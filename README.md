@@ -198,8 +198,13 @@ The optional `cookie-broker` Compose profile can run a separately configured `co
 ```bash
 # Configure COOKIE_BROKER_IMAGE, BROKER_URL, BROKER_USERNAME,
 # and secrets/cookie-broker-password first.
+sudo chown -R 1000:1000 cookies secrets/cookie-broker-password
+sudo chmod 700 cookies
+sudo chmod 600 secrets/cookie-broker-password
 docker compose --profile cookie-broker up -d cookie-sync
 ```
+
+The bot, workers, and cookie-sync share UID/GID `1000:1000` for these deployment-owned files. Keep the secret readable only by that owner.
 
 [Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker) is a related but separately deployed project. Media Pocket does not bundle it; its image, endpoint, credentials, and network policy remain operator choices.
 
