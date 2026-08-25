@@ -84,6 +84,13 @@ class DeliveryMode(StrEnum):
     FILE = "file"
 
 
+class PlaylistScope(StrEnum):
+    NONE = "none"
+    ASK = "ask"
+    SINGLE = "single"
+    PLAYLIST = "playlist"
+
+
 class InviteKind(StrEnum):
     TIMED = "timed"
     ONE_TIME = "one_time"
@@ -195,6 +202,7 @@ class UserPreferences:
     delete_source: bool = True
     default_audio_only: bool = False
     compact_progress: bool = False
+    include_playlist: bool = False
     youtube_mode: str = "video"
 
     def cache_variant(self, *, audio_only: bool = False) -> str:
@@ -203,6 +211,7 @@ class UserPreferences:
                 "audio" if audio_only else "media",
                 self.quality,
                 "m4a" if audio_only else "mp4",
+                "playlist" if self.include_playlist else "single",
             )
         )
 
@@ -285,6 +294,7 @@ class SelectionRequest:
     delivery: DeliveryMode
     created_at: datetime
     expires_at: datetime
+    playlist_scope: PlaylistScope = PlaylistScope.NONE
     job_kind: JobKind = JobKind.DIRECT
     source_message_id: int | None = None
     status_message_id: int | None = None

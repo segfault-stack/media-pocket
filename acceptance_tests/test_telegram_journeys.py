@@ -339,6 +339,39 @@ async def test_plain_youtube_link_starts_video_unless_user_always_asks() -> None
 
 
 @pytest.mark.asyncio
+async def test_fast_command_with_youtube_playlist_still_requires_scope_choice() -> None:
+    submit, batch, gateway = Submit(), Batch(), SelectionGateway()
+    create, stub = SelectionCreator(), Stub()
+    router = build_router(
+        submit,
+        batch,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        gateway,
+        Jobs(),
+        create_selection=create,
+        update_selection=stub,
+        confirm_selection=stub,
+        plan_submission=SubmissionPlanner(),
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        chat=SimpleNamespace(id=2, type=ChatType.PRIVATE),
+        text="/audio https://youtu.be/video?list=PL123",
+        message_id=3,
+        business_connection_id=None,
+    )
+    await handler(router, "message", "links")(message)
+    assert not submit.commands
+    assert create.calls[-1]["mode_override"] is SelectionMode.AUDIO
+    assert gateway.selections
+
+
+@pytest.mark.asyncio
 async def test_plain_audio_first_link_and_mixed_batch_use_natural_modes() -> None:
     submit, batch, gateway = Submit(), Batch(), Gateway()
     stub = Stub()
@@ -428,6 +461,25 @@ async def test_inline_always_ask_routes_to_private_without_creating_job() -> Non
     assert answers[-1][1]["button"].start_parameter == "inline"
     assert not create.calls
     assert not submit.commands
+
+
+@pytest.mark.asyncio
+async def test_inline_playlist_routes_to_private_scope_picker() -> None:
+    router, submit, _batch, _gateway = make_router()
+    answers = []
+
+    async def answer(*args, **kwargs):
+        answers.append((args, kwargs))
+
+    query = SimpleNamespace(
+        query="https://youtu.be/video?list=PL123",
+        from_user=SimpleNamespace(id=5),
+        answer=answer,
+    )
+    await handler(router, "inline_query", "inline")(query)
+    assert not submit.commands
+    assert answers[-1][0][0] == []
+    assert answers[-1][1]["button"].start_parameter == "inline"
 
 
 @pytest.mark.asyncio

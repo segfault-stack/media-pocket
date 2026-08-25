@@ -55,7 +55,7 @@ Video is normalized to streaming-compatible MP4 with H.264/AAC. Audio is normali
 3. **Process** — update one status message with queue position, progress, speed, size, and ETA when available.
 4. **Deliver** — send only the file or media group, remove the technical status after success, and keep optional actions in a separate message.
 
-Ordinary links start immediately. YouTube can be configured per user as **Video**, **Audio**, or **Always ask**; only **Always ask** opens the 15-minute selection card. Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` requests always start immediately and override the saved mode.
+Ordinary links start immediately. YouTube can be configured per user as **Video**, **Audio**, or **Always ask**; only **Always ask** opens the 15-minute format card. A YouTube URL containing a playlist always asks whether to download the current video or the entire playlist before anything is queued. Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` still override the saved format, but they do not bypass the playlist-scope choice.
 
 For batches, each link keeps its provider-native mode. If a batch contains YouTube and **Always ask** is enabled, one choice applies to the batch, with the nearest valid fallback for incompatible items.
 
@@ -254,6 +254,7 @@ Report vulnerabilities privately through [the security policy](SECURITY.md). Nev
 | `ARTIFACT_ROOT` | shared download directory | `downloads` |
 | `DOWNLOAD_MAX_FILE_SIZE` | maximum artifact size in bytes | `2000000000` |
 | `MAX_PARALLEL_DOWNLOADS` | concurrent downloads per worker | `4` |
+| `YTDLP_RESOLVE_TIMEOUT_SECONDS` | maximum yt-dlp metadata resolution time | `120` |
 | `ARTIFACT_RETENTION_SECONDS` | completed artifact retention | `86400` |
 | `UX_SELECTION_FLOW` | honor YouTube's **Always ask** picker | `true` |
 | `SPOTIFY_BITRATE` | native Spotify bitrate: 96, 160, or 320 | `320` |

@@ -17,6 +17,7 @@ from downloader_bot.domain import (
     MediaKind,
     MediaPost,
     Platform,
+    PlaylistScope,
     Progress,
     SelectionMode,
     SelectionRequest,
@@ -28,8 +29,11 @@ from downloader_bot.infrastructure.database import (
     JobRow,
     PreferencesRow,
     SelectionRow,
+    SqlSelectionRepository,
     _decode_artifacts,
     _decode_preferences,
+    _decode_selection_urls,
+    _encode_selection_urls,
     _job,
     _job_values,
     _preferences,
@@ -699,6 +703,17 @@ def test_database_mapping_round_trip_and_schema() -> None:
         status_message_id=4,
     )
     assert _selection(SelectionRow(**_selection_values(selection))) == selection
+    assert _decode_selection_urls('["https://example.com/legacy"]') == (
+        ("https://example.com/legacy",),
+        PlaylistScope.NONE,
+    )
+    encoded_urls = _encode_selection_urls(
+        ("https://youtube.com/playlist?list=PL123",), PlaylistScope.PLAYLIST
+    )
+    assert _decode_selection_urls(encoded_urls) == (
+        ("https://youtube.com/playlist?list=PL123",),
+        PlaylistScope.PLAYLIST,
+    )
     manifest = json.dumps(
         [
             {
@@ -720,6 +735,15 @@ def test_database_mapping_round_trip_and_schema() -> None:
         "Artist",
         12_000,
     )
+
+
+@pytest.mark.asyncio
+async def test_selection_repository_rejects_invalid_playlist_scope_type() -> None:
+    repository = SqlSelectionRepository(None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid playlist scope"):
+        await repository.update(
+            "selection", 1, datetime.now(UTC), playlist_scope=object()
+        )
 
 
 class FakeRedis:

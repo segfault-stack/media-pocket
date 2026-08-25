@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
+import signal
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -13,7 +15,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from downloader_bot.application.ports import PlatformAdapter
+from downloader_bot.application.ports import Cancellation, PlatformAdapter
 from downloader_bot.domain import (
     MediaAsset,
     MediaKind,
@@ -59,6 +61,8 @@ _HITMOZ_MIRRORS = (
 )
 _ZAYCEV_TRACK_PATTERN = re.compile(r"^/pages/\d+/(?P<id>\d+)\.shtml$")
 _ZAYCEV_API_BASE = "https://zaycev.net/api/external"
+_PROCESS_POLL_SECONDS = 0.25
+_PROCESS_STOP_SECONDS = 2.0
 
 
 class _SpotifyTrack(TypedDict):
@@ -67,15 +71,75 @@ class _SpotifyTrack(TypedDict):
     duration_ms: int | None
 
 
+async def _communicate_ytdlp(
+    process: asyncio.subprocess.Process,
+    *,
+    cancellation: Cancellation | None,
+    timeout_seconds: int,
+) -> tuple[bytes, bytes]:
+    task = asyncio.create_task(process.communicate())
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                await _stop_process_group(process)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise DownloadError(
+                    ErrorCode.UNAVAILABLE, "Provider metadata lookup timed out"
+                )
+            done, _ = await asyncio.wait(
+                {task}, timeout=min(_PROCESS_POLL_SECONDS, remaining)
+            )
+            if task in done:
+                return task.result()
+            if cancellation is not None and await cancellation.requested():
+                await _stop_process_group(process)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+    except asyncio.CancelledError:
+        await _stop_process_group(process)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+async def _stop_process_group(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_PROCESS_STOP_SECONDS)
+        return
+    except TimeoutError:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    await process.wait()
+
+
 @dataclass(slots=True)
 class YtDlpPlatformAdapter:
     platform: Platform
     cookies_file: str | None = None
     format_selector: str = "best[ext=mp4]/best"
     youtube_pot_provider_url: str | None = None
+    resolve_timeout_seconds: int = 120
 
     async def resolve(
-        self, url: str, preferences: UserPreferences, *, audio_only: bool = False
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
     ) -> MediaPost:
         selector = _format_selector(preferences, audio_only=audio_only)
         return await self._resolve_target(
@@ -83,6 +147,8 @@ class YtDlpPlatformAdapter:
             source_url=url,
             format_selector=selector,
             force_audio=audio_only,
+            include_playlist=preferences.include_playlist,
+            cancellation=cancellation,
         )
 
     async def _resolve_target(
@@ -92,6 +158,8 @@ class YtDlpPlatformAdapter:
         source_url: str,
         format_selector: str | None = None,
         force_audio: bool = False,
+        include_playlist: bool = False,
+        cancellation: Cancellation | None = None,
     ) -> MediaPost:
         with writable_cookie_file(self.cookies_file) as cookie_file:
             command = [
@@ -102,6 +170,7 @@ class YtDlpPlatformAdapter:
                 "--no-warnings",
                 "--format",
                 format_selector or self.format_selector,
+                "--yes-playlist" if include_playlist else "--no-playlist",
             ]
             if cookie_file:
                 command.extend(("--cookies", cookie_file))
@@ -122,8 +191,13 @@ class YtDlpPlatformAdapter:
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await _communicate_ytdlp(
+                process,
+                cancellation=cancellation,
+                timeout_seconds=self.resolve_timeout_seconds,
+            )
         if process.returncode:
             detail = stderr.decode(errors="replace").strip()
             lowered = detail.lower()
@@ -246,7 +320,12 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
     resolve_timeout_seconds: int = 120
 
     async def resolve(
-        self, url: str, preferences: UserPreferences, *, audio_only: bool = False
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
     ) -> MediaPost:
         if self.command:
             try:
@@ -282,6 +361,7 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
                     source_url=url,
                     format_selector="bestaudio/best",
                     force_audio=True,
+                    cancellation=cancellation,
                 )
                 if resolved.assets:
                     assets.append(
@@ -325,6 +405,7 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
             source_url=url,
             format_selector="bestaudio/best",
             force_audio=True,
+            cancellation=cancellation,
         )
         return replace(
             resolved,
@@ -474,9 +555,14 @@ class HitMozPlatformAdapter:
     client: httpx.AsyncClient
 
     async def resolve(
-        self, url: str, preferences: UserPreferences, *, audio_only: bool = False
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
     ) -> MediaPost:
-        del preferences, audio_only
+        del preferences, audio_only, cancellation
         last_error: DownloadError | None = None
         for candidate in _hitmoz_candidates(url):
             try:
@@ -529,9 +615,14 @@ class ZaycevPlatformAdapter:
     client: httpx.AsyncClient
 
     async def resolve(
-        self, url: str, preferences: UserPreferences, *, audio_only: bool = False
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
     ) -> MediaPost:
-        del preferences, audio_only
+        del preferences, audio_only, cancellation
         match = _ZAYCEV_TRACK_PATTERN.fullmatch(urlsplit(url).path)
         if not match:
             raise DownloadError(ErrorCode.UNSUPPORTED, "Unsupported Zaycev.net URL")
@@ -657,6 +748,7 @@ class DefaultPlatformRegistry:
         spotify_command: str | None = None,
         spotify_cache_dir: str = "spotify",
         spotify_resolve_timeout_seconds: int = 120,
+        ytdlp_resolve_timeout_seconds: int = 120,
         youtube_pot_provider_url: str | None = None,
     ) -> None:
         provider_cookies = cookies_files or {}
@@ -665,6 +757,7 @@ class DefaultPlatformRegistry:
                 platform,
                 provider_cookies.get(platform) or cookies_file,
                 youtube_pot_provider_url=youtube_pot_provider_url,
+                resolve_timeout_seconds=ytdlp_resolve_timeout_seconds,
             )
             for platform in Platform
         }

@@ -12,12 +12,14 @@ from downloader_bot.domain import (
     Job,
     JobKind,
     JobStage,
+    PlaylistScope,
     Progress,
     SelectionMode,
     SelectionRequest,
     UserPreferences,
 )
 from downloader_bot.domain.errors import DownloadError
+from downloader_bot.domain.youtube import has_youtube_playlist
 
 from .ports import (
     AnalyticsRepository,
@@ -49,6 +51,7 @@ class SubmitDownloadCommand:
     audio_only: bool = False
     quality: str | None = None
     document_mode: bool | None = None
+    include_playlist: bool = False
     status_message_id: int | None = None
     inline_message_id: str | None = None
 
@@ -122,6 +125,7 @@ class SubmitDownload:
             preferences = replace(preferences, quality=command.quality)
         if command.document_mode is not None:
             preferences = replace(preferences, document_mode=command.document_mode)
+        preferences = replace(preferences, include_playlist=command.include_playlist)
         variant = preferences.cache_variant(audio_only=command.audio_only)
         dedupe_key = hashlib.sha256(
             f"{command.user_id}\0{url}\0{variant}\0{dedupe_scope or ''}".encode()
@@ -206,6 +210,7 @@ class SubmitBatch:
         audio_only_by_url: tuple[bool, ...] | None = None,
         quality: str | None = None,
         document_mode: bool | None = None,
+        include_playlist: bool = False,
         status_message_id: int | None = None,
     ) -> tuple[Job, tuple[Job, ...]]:
         if not urls:
@@ -219,6 +224,7 @@ class SubmitBatch:
             preferences = replace(preferences, quality=quality)
         if document_mode is not None:
             preferences = replace(preferences, document_mode=document_mode)
+        preferences = replace(preferences, include_playlist=include_playlist)
         parent = Job(
             id=parent_id,
             user_id=user_id,
@@ -250,6 +256,7 @@ class SubmitBatch:
                     else audio_only,
                     quality=quality,
                     document_mode=document_mode,
+                    include_playlist=include_playlist,
                     status_message_id=None,
                 ),
                 dedupe_scope=f"{parent.id}:{index}",
@@ -294,6 +301,7 @@ class CreateSelection:
         kind: JobKind = JobKind.DIRECT,
         source_message_id: int | None = None,
         business_connection_id: str | None = None,
+        mode_override: SelectionMode | None = None,
     ) -> SelectionRequest:
         if not urls:
             raise ValueError("selection requires at least one URL")
@@ -301,7 +309,16 @@ class CreateSelection:
         await self._users.ensure(user_id)
         preferences = await self._settings.get(user_id)
         platforms = tuple(self._registry.detect(url).platform for url in validated)
-        mode = _default_mode(platforms, preferences)
+        playlist_scope = (
+            PlaylistScope.ASK
+            if any(has_youtube_playlist(url) for url in validated)
+            else PlaylistScope.NONE
+        )
+        mode = (
+            _allowed_mode(mode_override, platforms)
+            if mode_override is not None
+            else _default_mode(platforms, preferences)
+        )
         now = self._clock.now()
         selection = await self._selections.create(
             SelectionRequest(
@@ -325,6 +342,7 @@ class CreateSelection:
                 business_connection_id=business_connection_id,
                 created_at=now,
                 expires_at=now + timedelta(minutes=15),
+                playlist_scope=playlist_scope,
                 job_kind=kind,
             )
         )
@@ -376,6 +394,14 @@ class UpdateSelection:
             changes = {"quality": value}
         elif action == "delivery" and value in {item.value for item in DeliveryMode}:
             changes = {"delivery": DeliveryMode(value)}
+        elif action == "scope" and value in {
+            PlaylistScope.SINGLE.value,
+            PlaylistScope.PLAYLIST.value,
+        }:
+            requested_scope = PlaylistScope(value)
+            if not any(has_youtube_playlist(url) for url in selection.urls):
+                raise ValueError("selection does not contain a YouTube playlist")
+            changes = {"playlist_scope": requested_scope}
         else:
             raise ValueError("invalid selection option")
         updated = await self._selections.update(token, user_id, now, **changes)
@@ -412,8 +438,12 @@ class ConfirmSelection:
         selection = await self._selections.claim(token, user_id, now)
         if selection is None:
             return await self._selections.get(token), None, False
+        if selection.playlist_scope is PlaylistScope.ASK:
+            await self._selections.release_claim(token, user_id, now)
+            return await self._selections.get(token), None, False
         audio_only = selection.mode is SelectionMode.AUDIO
         document_mode = selection.delivery is DeliveryMode.FILE
+        include_playlist = selection.playlist_scope is PlaylistScope.PLAYLIST
         try:
             if len(selection.urls) > 1:
                 job, _ = await self._submit_batch.execute(
@@ -425,6 +455,7 @@ class ConfirmSelection:
                     audio_only=audio_only,
                     quality=selection.quality,
                     document_mode=document_mode,
+                    include_playlist=include_playlist,
                     status_message_id=selection.status_message_id,
                 )
             else:
@@ -439,6 +470,7 @@ class ConfirmSelection:
                         audio_only=audio_only,
                         quality=selection.quality,
                         document_mode=document_mode,
+                        include_playlist=include_playlist,
                         status_message_id=selection.status_message_id,
                         inline_message_id=inline_message_id,
                     )
@@ -498,6 +530,7 @@ class RetryInFormat:
                 audio_only=audio_only,
                 quality=source.preferences.quality,
                 document_mode=document_mode,
+                include_playlist=source.preferences.include_playlist,
             )
         )
         await self._analytics.record(
@@ -569,10 +602,14 @@ class ProcessDownload:
                         "job_ready", user_id=job.user_id, job_id=job.id
                     )
                 return job
+            cancellation = RepositoryCancellation(self._jobs, job.id)
             post = await adapter.resolve(
-                job.source_url, job.preferences, audio_only=job.audio_only
+                job.source_url,
+                job.preferences,
+                audio_only=job.audio_only,
+                cancellation=cancellation,
             )
-            if await RepositoryCancellation(self._jobs, job.id).requested():
+            if await cancellation.requested():
                 return await self._cancel(job)
             job = await self._move(job, {JobStage.RESOLVING}, JobStage.DOWNLOADING, 0)
             if job is None:
@@ -581,7 +618,6 @@ class ProcessDownload:
             async def report(event: Progress) -> None:
                 await self._progress.publish(event)
 
-            cancellation = RepositoryCancellation(self._jobs, job.id)
             produced = await self._engine.download(post, job, report, cancellation)
             if await cancellation.requested():
                 return await self._cancel(job)

@@ -19,7 +19,15 @@ from aiogram.types import (
 )
 
 from downloader_bot.application.use_cases import SubmitDownloadCommand
-from downloader_bot.domain import InviteKind, JobKind, JobStage, Progress
+from downloader_bot.domain import (
+    InviteKind,
+    JobKind,
+    JobStage,
+    PlaylistScope,
+    Progress,
+    SelectionMode,
+)
+from downloader_bot.domain.youtube import has_youtube_playlist
 
 from .access import AdminOnlyMiddleware
 from .presenter import (
@@ -49,6 +57,7 @@ from .presenter import (
     INLINE_WAITING_TEXT,
     NO_PERMISSION_TEXT,
     NOT_OWNER_TEXT,
+    PLAYLIST_SCOPE_REQUIRED_TEXT,
     SAVED_TEXT,
     START_TEXT,
     UNKNOWN_SETTING_TEXT,
@@ -420,13 +429,16 @@ def build_router(
         plan = None
         if not audio_only and not video_only and plan_submission is not None:
             plan = await plan_submission.execute(message.from_user.id, urls)
-        if (
-            ux_selection_flow
-            and create_selection is not None
-            and not audio_only
-            and not video_only
-            and plan is not None
-            and plan.ask_for_youtube
+        playlist_choice_required = any(has_youtube_playlist(url) for url in urls)
+        if create_selection is not None and (
+            playlist_choice_required
+            or (
+                ux_selection_flow
+                and not audio_only
+                and not video_only
+                and plan is not None
+                and plan.ask_for_youtube
+            )
         ):
             selection = await create_selection.execute(
                 user_id=message.from_user.id,
@@ -435,6 +447,11 @@ def build_router(
                 kind=kind,
                 source_message_id=message.message_id,
                 business_connection_id=business_connection_id,
+                mode_override=SelectionMode.AUDIO
+                if audio_only
+                else SelectionMode.VIDEO
+                if video_only
+                else None,
             )
             status_id = await gateway.show_selection(selection)
             await create_selection.bind_message(
@@ -474,6 +491,14 @@ def build_router(
                 token, query.from_user.id
             )
             if not claimed or job is None:
+                if (
+                    selection is not None
+                    and selection.playlist_scope is PlaylistScope.ASK
+                ):
+                    await query.answer(
+                        PLAYLIST_SCOPE_REQUIRED_TEXT, show_alert=True
+                    )
+                    return
                 await update_selection.record_expired(query.from_user.id)
                 await query.answer(EXPIRED_TEXT, show_alert=True)
                 return
@@ -610,9 +635,12 @@ def build_router(
                 else None
             )
             if (
-                ux_selection_flow
-                and plan is not None
-                and plan.ask_for_youtube
+                has_youtube_playlist(urls[0])
+                or (
+                    ux_selection_flow
+                    and plan is not None
+                    and plan.ask_for_youtube
+                )
             ):
                 await query.answer(
                     [],

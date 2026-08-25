@@ -12,11 +12,13 @@ from downloader_bot.domain import (
     Job,
     JobStage,
     Platform,
+    PlaylistScope,
     Progress,
     SelectionMode,
     SelectionRequest,
     UserPreferences,
 )
+from downloader_bot.domain.youtube import youtube_playlist_has_single_video
 
 AUDIO_PLATFORMS = frozenset(
     {Platform.SPOTIFY, Platform.SOUNDCLOUD, Platform.HITMOZ, Platform.ZAYCEV}
@@ -57,6 +59,7 @@ EXPIRED_TEXT = "This request has expired. Send the link again."
 ALREADY_HANDLED_TEXT = "This request has already been handled."
 NOT_OWNER_TEXT = "Only the person who sent the link can use these controls."
 SAVED_TEXT = "Saved"
+PLAYLIST_SCOPE_REQUIRED_TEXT = "Choose the video or playlist first."
 UNKNOWN_SETTING_TEXT = "Unknown setting"
 NO_PERMISSION_TEXT = "You don’t have permission to use this command."
 DOWNLOAD_STARTED_TEXT = "Download started"
@@ -344,6 +347,23 @@ def inline_pending_keyboard(token: str) -> InlineKeyboardMarkup:
 
 
 def render_selection(selection: SelectionRequest) -> str:
+    if selection.playlist_scope is PlaylistScope.ASK:
+        has_single = any(
+            youtube_playlist_has_single_video(url) for url in selection.urls
+        )
+        detail = (
+            "This link contains both a video and a playlist."
+            if has_single
+            else "This link points to a YouTube playlist."
+        )
+        return "\n".join(
+            (
+                "<b>📚 Playlist detected</b>",
+                detail,
+                "Choose what you want to download.",
+                f"<code>{escape(_short_url(selection.urls[0]))}</code>",
+            )
+        )
     platforms = ", ".join(
         dict.fromkeys(_platform_name(item) for item in selection.platforms)
     )
@@ -364,6 +384,10 @@ def render_selection(selection: SelectionRequest) -> str:
             f"<code>{escape(_short_url(selection.urls[0]))}</code>",
         ]
     )
+    if selection.playlist_scope is PlaylistScope.SINGLE:
+        lines.append("Scope: this video only")
+    elif selection.playlist_scope is PlaylistScope.PLAYLIST:
+        lines.append("Scope: entire playlist")
     if any(
         item in {Platform.INSTAGRAM, Platform.TIKTOK, Platform.X}
         for item in selection.platforms
@@ -377,6 +401,50 @@ def render_selection(selection: SelectionRequest) -> str:
 def selection_keyboard(selection: SelectionRequest) -> InlineKeyboardMarkup:
     token = selection.token
     rows: list[list[InlineKeyboardButton]] = []
+    if selection.playlist_scope is PlaylistScope.ASK:
+        scope_row = []
+        if any(youtube_playlist_has_single_video(url) for url in selection.urls):
+            scope_row.append(
+                _choice("🎬 This video", "scope", "single", token, False)
+            )
+        scope_row.append(
+            _choice("📚 Entire playlist", "scope", "playlist", token, False)
+        )
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                scope_row,
+                [
+                    InlineKeyboardButton(
+                        text="Cancel", callback_data=f"sel:cancel:{token}"
+                    )
+                ],
+            ]
+        )
+    if selection.playlist_scope in {
+        PlaylistScope.SINGLE,
+        PlaylistScope.PLAYLIST,
+    }:
+        scope_row = []
+        if any(youtube_playlist_has_single_video(url) for url in selection.urls):
+            scope_row.append(
+                _choice(
+                    "🎬 This video",
+                    "scope",
+                    "single",
+                    token,
+                    selection.playlist_scope is PlaylistScope.SINGLE,
+                )
+            )
+        scope_row.append(
+            _choice(
+                "📚 Entire playlist",
+                "scope",
+                "playlist",
+                token,
+                selection.playlist_scope is PlaylistScope.PLAYLIST,
+            )
+        )
+        rows.append(scope_row)
     if all(item in AUDIO_PLATFORMS for item in selection.platforms):
         rows.append([_choice("🎧 Audio", "mode", "audio", token, True)])
     elif any(item in SOCIAL_PLATFORMS for item in selection.platforms):

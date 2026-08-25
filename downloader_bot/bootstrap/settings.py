@@ -32,6 +32,7 @@ class Settings:
     spotify_cache_dir: Path = Path("spotify")
     spotify_bitrate: int = 320
     spotify_resolve_timeout_seconds: int = 120
+    ytdlp_resolve_timeout_seconds: int = 120
     ux_selection_flow: bool = True
 
     @classmethod
@@ -60,6 +61,11 @@ class Settings:
         )
         if spotify_resolve_timeout_seconds < 1:
             raise ValueError("SPOTIFY_RESOLVE_TIMEOUT_SECONDS must be at least 1")
+        ytdlp_resolve_timeout_seconds = int(
+            values.get("YTDLP_RESOLVE_TIMEOUT_SECONDS", "120")
+        )
+        if ytdlp_resolve_timeout_seconds < 1:
+            raise ValueError("YTDLP_RESOLVE_TIMEOUT_SECONDS must be at least 1")
         cookies_file = values.get("YTDLP_COOKIES_FILE") or None
         return cls(
             bot_token=bot_token,
@@ -92,6 +98,7 @@ class Settings:
             spotify_cache_dir=Path(values.get("SPOTIFY_CACHE_DIR", "spotify")),
             spotify_bitrate=spotify_bitrate,
             spotify_resolve_timeout_seconds=spotify_resolve_timeout_seconds,
+            ytdlp_resolve_timeout_seconds=ytdlp_resolve_timeout_seconds,
             ux_selection_flow=_parse_bool(values.get("UX_SELECTION_FLOW", "true")),
         )
 

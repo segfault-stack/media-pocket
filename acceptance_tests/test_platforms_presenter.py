@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -19,6 +20,7 @@ from downloader_bot.domain import (
     JobStage,
     MediaKind,
     Platform,
+    PlaylistScope,
     Progress,
     SelectionMode,
     SelectionRequest,
@@ -26,6 +28,10 @@ from downloader_bot.domain import (
 )
 from downloader_bot.domain.errors import DownloadError
 from downloader_bot.domain.models import MediaSource
+from downloader_bot.domain.youtube import (
+    has_youtube_playlist,
+    youtube_playlist_has_single_video,
+)
 from downloader_bot.infrastructure.platforms import (
     PLATFORM_DOMAINS,
     DefaultPlatformRegistry,
@@ -33,6 +39,7 @@ from downloader_bot.infrastructure.platforms import (
     SpotifyPlatformAdapter,
     YtDlpPlatformAdapter,
     ZaycevPlatformAdapter,
+    _stop_process_group,
 )
 
 
@@ -138,6 +145,91 @@ async def test_ytdlp_fixture_maps_album_assets_and_photos(monkeypatch) -> None:
         "https://instagram.com/p/x", UserPreferences(quality="720")
     )
     assert [asset.kind for asset in post.assets] == [MediaKind.PHOTO, MediaKind.VIDEO]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_playlist", "expected", "excluded"),
+    [
+        (False, "--no-playlist", "--yes-playlist"),
+        (True, "--yes-playlist", "--no-playlist"),
+    ],
+)
+async def test_ytdlp_uses_explicit_playlist_policy(
+    monkeypatch, include_playlist, expected, excluded
+) -> None:
+    command = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"url":"https://cdn.example/video.mp4","ext":"mp4"}', b""
+
+    async def create(*args, **_kwargs):
+        command.extend(args)
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    await YtDlpPlatformAdapter(Platform.YOUTUBE).resolve(
+        "https://youtu.be/video?list=PL123",
+        UserPreferences(include_playlist=include_playlist),
+    )
+    assert expected in command
+    assert excluded not in command
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancelled", "timeout", "code"),
+    [(True, 120, ErrorCode.CANCELLED), (False, 0, ErrorCode.UNAVAILABLE)],
+)
+async def test_ytdlp_resolver_stops_process_on_cancel_or_timeout(
+    monkeypatch, cancelled, timeout, code
+) -> None:
+    stopped = False
+
+    class Cancellation:
+        async def requested(self):
+            return cancelled
+
+    class Process:
+        returncode = None
+        pid = 123
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    async def create(*_args, **_kwargs):
+        return Process()
+
+    async def stop(_process):
+        nonlocal stopped
+        stopped = True
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.platforms._PROCESS_POLL_SECONDS", 0.001
+    )
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.platforms._stop_process_group", stop
+    )
+    with pytest.raises(DownloadError) as raised:
+        await YtDlpPlatformAdapter(
+            Platform.YOUTUBE, resolve_timeout_seconds=timeout
+        ).resolve(
+            "https://youtu.be/video",
+            UserPreferences(),
+            cancellation=Cancellation(),
+        )
+    assert raised.value.code is code
+    assert stopped
+
+
+@pytest.mark.asyncio
+async def test_stopping_an_already_finished_process_is_a_noop() -> None:
+    process = type("Process", (), {"returncode": 0})()
+    await _stop_process_group(process)
 
 
 @pytest.mark.asyncio
@@ -763,6 +855,81 @@ def test_audio_selection_hides_video_quality_and_uses_compact_actions() -> None:
     assert not any(label in labels for label in ("✓ Best", "1080p", "720p", "480p"))
     assert "🎧 Audio · ▶️ In chat" in text
     assert [button.text for button in keyboard[-1]] == ["⬇️ Download", "Cancel"]
+
+
+def test_playlist_selection_starts_with_a_clear_scope_choice() -> None:
+    now = datetime.now(UTC)
+    selection = SelectionRequest(
+        token="12345678-1234-1234-1234-123456789012",
+        user_id=1,
+        chat_id=2,
+        urls=("https://youtu.be/video?list=PL123",),
+        platforms=(Platform.YOUTUBE,),
+        mode=SelectionMode.VIDEO,
+        quality="best",
+        delivery=DeliveryMode.MEDIA,
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        playlist_scope=PlaylistScope.ASK,
+    )
+    assert "Playlist detected" in render_selection(selection)
+    labels = [
+        button.text
+        for row in selection_keyboard(selection).inline_keyboard
+        for button in row
+    ]
+    assert labels == ["🎬 This video", "📚 Entire playlist", "Cancel"]
+    assert "⬇️ Download" not in labels
+
+
+@pytest.mark.parametrize(
+    ("scope", "summary", "selected_label"),
+    [
+        (PlaylistScope.SINGLE, "Scope: this video only", "✓ 🎬 This video"),
+        (PlaylistScope.PLAYLIST, "Scope: entire playlist", "✓ 📚 Entire playlist"),
+    ],
+)
+def test_selected_playlist_scope_is_visible_and_changeable(
+    scope, summary, selected_label
+) -> None:
+    now = datetime.now(UTC)
+    selection = SelectionRequest(
+        token="12345678-1234-1234-1234-123456789012",
+        user_id=1,
+        chat_id=2,
+        urls=("https://youtu.be/video?list=PL123",),
+        platforms=(Platform.YOUTUBE,),
+        mode=SelectionMode.VIDEO,
+        quality="best",
+        delivery=DeliveryMode.MEDIA,
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        playlist_scope=scope,
+    )
+    assert summary in render_selection(selection)
+    labels = [
+        button.text
+        for row in selection_keyboard(selection).inline_keyboard
+        for button in row
+    ]
+    assert selected_label in labels
+    assert "⬇️ Download" in labels
+
+
+@pytest.mark.parametrize(
+    ("url", "has_playlist", "has_single"),
+    [
+        ("https://example.com/watch?v=x&list=PL123", False, False),
+        ("https://youtube.com/watch?v=x", False, False),
+        ("https://youtube.com/playlist?list=PL123", True, False),
+        ("https://youtube.com/watch?v=x&list=PL123", True, True),
+        ("https://youtu.be/x?list=PL123", True, True),
+        ("https://youtube.com/shorts/x?list=PL123", True, True),
+    ],
+)
+def test_youtube_playlist_url_detection(url, has_playlist, has_single) -> None:
+    assert has_youtube_playlist(url) is has_playlist
+    assert youtube_playlist_has_single_video(url) is has_single
 
 
 @pytest.mark.parametrize(

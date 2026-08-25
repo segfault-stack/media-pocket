@@ -20,20 +20,25 @@ from downloader_bot.domain import (
 ProgressCallback = Callable[[Progress], Awaitable[None]]
 
 
+class Cancellation(Protocol):
+    async def requested(self) -> bool: ...
+
+
 class PlatformAdapter(Protocol):
     platform: Platform
 
     async def resolve(
-        self, url: str, preferences: UserPreferences, *, audio_only: bool = False
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
     ) -> MediaPost: ...
 
 
 class PlatformRegistry(Protocol):
     def detect(self, url: str) -> PlatformAdapter: ...
-
-
-class Cancellation(Protocol):
-    async def requested(self) -> bool: ...
 
 
 class DownloadEngine(Protocol):

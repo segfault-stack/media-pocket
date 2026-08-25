@@ -138,6 +138,7 @@ async def build_container(settings: Settings) -> Container:
         spotify_command=settings.spotify_command,
         spotify_cache_dir=str(settings.spotify_cache_dir),
         spotify_resolve_timeout_seconds=settings.spotify_resolve_timeout_seconds,
+        ytdlp_resolve_timeout_seconds=settings.ytdlp_resolve_timeout_seconds,
     )
     submit = SubmitDownload(jobs, users, ids, clock, analytics, preferences)
     submit_batch = SubmitBatch(submit, jobs, ids, clock, preferences)

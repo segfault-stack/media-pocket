@@ -42,6 +42,7 @@ from downloader_bot.domain import (
     MediaKind,
     MediaPost,
     Platform,
+    PlaylistScope,
     Progress,
     SelectionMode,
     SelectionRequest,
@@ -284,7 +285,10 @@ class Cache:
 class Adapter:
     platform = Platform.GENERIC
 
-    async def resolve(self, url, preferences, *, audio_only=False):
+    async def resolve(
+        self, url, preferences, *, audio_only=False, cancellation=None
+    ):
+        del cancellation
         assert preferences.quality
         return MediaPost(
             url, self.platform, (MediaAsset("https://cdn/x.mp4", MediaKind.VIDEO),)
@@ -619,6 +623,41 @@ async def test_audio_selection_forces_audio_and_can_be_cancelled() -> None:
     forced = await update.execute(selection.token, 1, action="mode", value="video")
     assert forced and forced.mode is SelectionMode.AUDIO
     assert await update.cancel(selection.token, 1)
+
+
+@pytest.mark.asyncio
+async def test_youtube_playlist_requires_explicit_scope_before_confirmation() -> None:
+    selections, analytics = Selections(), Analytics()
+    jobs, users, ids, clock, settings = Jobs(), Users(), Ids(), Clock(), Settings()
+    submit = SubmitDownload(jobs, users, ids, clock, analytics, settings)
+    batch = SubmitBatch(submit, jobs, ids, clock, settings)
+    create = CreateSelection(
+        selections, users, settings, YoutubeRegistry(), ids, clock, analytics
+    )
+    selection = await create.execute(
+        user_id=1,
+        chat_id=1,
+        urls=("https://youtu.be/video?list=PL123",),
+    )
+    assert selection.playlist_scope is PlaylistScope.ASK
+
+    pending, job, claimed = await ConfirmSelection(
+        selections, submit, batch, clock, analytics
+    ).execute(selection.token, 1)
+    assert pending and pending.active
+    assert job is None
+    assert not claimed
+
+    update = UpdateSelection(selections, clock, analytics)
+    selected = await update.execute(
+        selection.token, 1, action="scope", value="playlist"
+    )
+    assert selected and selected.playlist_scope is PlaylistScope.PLAYLIST
+    _, job, claimed = await ConfirmSelection(
+        selections, submit, batch, clock, analytics
+    ).execute(selection.token, 1)
+    assert claimed and job
+    assert job.preferences.include_playlist
 
 
 @pytest.mark.asyncio

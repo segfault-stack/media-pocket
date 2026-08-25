@@ -42,6 +42,7 @@ from downloader_bot.domain import (
     JobStage,
     MediaKind,
     Platform,
+    PlaylistScope,
     SelectionMode,
     SelectionRequest,
     UserPreferences,
@@ -794,6 +795,16 @@ class SqlSelectionRepository:
     async def update(
         self, token: str, user_id: int, now: datetime, **changes: object
     ) -> SelectionRequest | None:
+        playlist_scope = changes.pop("playlist_scope", None)
+        if playlist_scope is not None:
+            if not isinstance(playlist_scope, (str, PlaylistScope)):
+                raise ValueError("invalid playlist scope")
+            current = await self.get(token)
+            if current is None:
+                return None
+            changes["urls_json"] = _encode_selection_urls(
+                current.urls, PlaylistScope(playlist_scope)
+            )
         values = {
             key: value.value
             if isinstance(value, (SelectionMode, DeliveryMode))
@@ -1015,7 +1026,9 @@ def _selection_values(selection: SelectionRequest) -> dict[str, object]:
         "token": selection.token,
         "user_id": selection.user_id,
         "chat_id": selection.chat_id,
-        "urls_json": json.dumps(selection.urls),
+        "urls_json": _encode_selection_urls(
+            selection.urls, selection.playlist_scope
+        ),
         "platforms_json": json.dumps([item.value for item in selection.platforms]),
         "mode": selection.mode.value,
         "quality": selection.quality,
@@ -1032,15 +1045,17 @@ def _selection_values(selection: SelectionRequest) -> dict[str, object]:
 
 
 def _selection(row: SelectionRow) -> SelectionRequest:
+    urls, playlist_scope = _decode_selection_urls(row.urls_json)
     return SelectionRequest(
         token=row.token,
         user_id=row.user_id,
         chat_id=row.chat_id,
-        urls=tuple(json.loads(row.urls_json)),
+        urls=urls,
         platforms=tuple(Platform(item) for item in json.loads(row.platforms_json)),
         mode=SelectionMode(row.mode),
         quality=row.quality,
         delivery=DeliveryMode(row.delivery),
+        playlist_scope=playlist_scope,
         job_kind=JobKind(row.job_kind),
         source_message_id=row.source_message_id,
         status_message_id=row.status_message_id,
@@ -1049,6 +1064,24 @@ def _selection(row: SelectionRow) -> SelectionRequest:
         expires_at=row.expires_at,
         claimed_at=row.claimed_at,
         cancelled_at=row.cancelled_at,
+    )
+
+
+def _encode_selection_urls(
+    urls: tuple[str, ...], playlist_scope: PlaylistScope
+) -> str:
+    return json.dumps(
+        {"urls": urls, "playlist_scope": playlist_scope.value}, sort_keys=True
+    )
+
+
+def _decode_selection_urls(value: str) -> tuple[tuple[str, ...], PlaylistScope]:
+    data = json.loads(value)
+    if isinstance(data, list):
+        return tuple(str(item) for item in data), PlaylistScope.NONE
+    return (
+        tuple(str(item) for item in data.get("urls", ())),
+        PlaylistScope(data.get("playlist_scope", PlaylistScope.NONE.value)),
     )
 
 

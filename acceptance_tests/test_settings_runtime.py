@@ -27,6 +27,7 @@ def test_typed_settings_parse_all_runtime_options() -> None:
             "YTDLP_TIKTOK_COOKIES_FILE": "/cookies/tiktok.txt",
             "YTDLP_INSTAGRAM_COOKIES_FILE": "/cookies/instagram.txt",
             "YTDLP_X_COOKIES_FILE": "/cookies/x.txt",
+            "YTDLP_RESOLVE_TIMEOUT_SECONDS": "75",
         }
     )
     assert settings.database_url.startswith("postgresql+asyncpg://")
@@ -39,6 +40,7 @@ def test_typed_settings_parse_all_runtime_options() -> None:
     assert settings.tiktok_cookies_file == "/cookies/tiktok.txt"
     assert settings.instagram_cookies_file == "/cookies/instagram.txt"
     assert settings.x_cookies_file == "/cookies/x.txt"
+    assert settings.ytdlp_resolve_timeout_seconds == 75
 
 
 def test_provider_cookie_files_fall_back_to_combined_file() -> None:
@@ -59,6 +61,17 @@ def test_parallel_download_limit_must_be_positive() -> None:
     with pytest.raises(ValueError, match="MAX_PARALLEL_DOWNLOADS"):
         Settings.from_env(
             {"BOT_TOKEN": "123:token", "DATABASE_URL": "postgresql://u:p@db/name", "MAX_PARALLEL_DOWNLOADS": "0"}
+        )
+
+
+def test_ytdlp_resolve_timeout_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="YTDLP_RESOLVE_TIMEOUT_SECONDS"):
+        Settings.from_env(
+            {
+                "BOT_TOKEN": "123:token",
+                "DATABASE_URL": "postgresql://u:p@db/name",
+                "YTDLP_RESOLVE_TIMEOUT_SECONDS": "0",
+            }
         )
 
 
