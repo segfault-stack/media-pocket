@@ -1,3 +1,6 @@
 [submodule "third_party/librespot"]
 	path = third_party/librespot
 	url = https://github.com/librespot-org/librespot.git
+[submodule ".agent/oss-playbook"]
+	path = .agent/oss-playbook
+	url = https://github.com/segfault-stack/oss-agent-playbook.git
