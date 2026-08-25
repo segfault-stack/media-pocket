@@ -24,6 +24,8 @@
 - Publication boundary: inspectable source, build and self-hosting instructions, safe configuration examples, and local verification. The repository does not promise a hosted instance, compatibility lifetime, contribution program, or response time.
 - Supported versions: the latest `0.1.x` release and `main`; see `SECURITY.md` for the security-support boundary.
 - Contribution and support policy: no formal policy is currently published.
+- Contribution intake and maintainer-review policy: no formal intake or review SLA is currently published; acceptance remains at maintainer discretion.
+- Agent-assisted public contribution policy: no project-specific policy is currently published.
 - Private security reporting route: GitHub private vulnerability reporting as documented in `SECURITY.md`.
 - External actions requiring maintainer authorization: pushes, tags, releases, repository settings, deployments, announcements, issue responses, and third-party submissions.
 
@@ -49,7 +51,7 @@
 ## Pinned playbook
 
 - Upstream: `https://github.com/segfault-stack/oss-agent-playbook`
-- Immutable ref: `v0.2.1`
-- Resolved commit: `b75930a93fd32bd36ac1b6ed91e399a00aef3618`
+- Immutable ref: `v0.4.1`
+- Resolved commit: `6ac968f8251b15ee78454fdd1d4358a23d2f71da`
 - Import method: `git submodule`
 - Imported or last reviewed: `2026-08-25`
