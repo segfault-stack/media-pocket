@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import mimetypes
-import os
 import sys
 import time
 from dataclasses import replace
@@ -26,6 +25,9 @@ from downloader_bot.domain import (
 from downloader_bot.domain.audio_names import build_audio_filename
 from downloader_bot.domain.errors import DownloadError
 from downloader_bot.infrastructure.cookies import writable_cookie_file
+
+_YTDLP_PROGRESS_PREFIX = "__MEDIA_POCKET_PROGRESS__"
+_CANCELLATION_POLL_SECONDS = 0.5
 
 
 class HttpDownloadEngine:
@@ -55,7 +57,7 @@ class HttpDownloadEngine:
     def _youtube_extractor_args(self) -> list[str]:
         args = [
             "--extractor-args",
-            f"youtube:player_client={os.getenv('YTDLP_YOUTUBE_PLAYER_CLIENT', 'mweb')}",
+            "youtube:player_client=mweb",
         ]
         if self._youtube_pot_provider_url:
             args.extend(
@@ -102,6 +104,22 @@ class HttpDownloadEngine:
                     return await self._download_youtube_fallback(
                         post, job, asset, item, directory, progress, cancellation
                     )
+            if asset.extractor_url and (
+                post.platform is Platform.YOUTUBE
+                or asset.requires_extractor_download
+            ):
+                target = await self._download_with_ytdlp(
+                    asset,
+                    job,
+                    item,
+                    len(post.assets),
+                    directory,
+                    progress,
+                    cancellation,
+                )
+                return await self._finalize(
+                    target, asset, job, progress, item, len(post.assets), cancellation
+                )
             suffix = _suffix(asset.source_url, asset.kind.value)
             target = _asset_path(
                 directory, asset, suffix, audio_only=job.audio_only
@@ -133,7 +151,15 @@ class HttpDownloadEngine:
                             progress,
                             cancellation,
                         )
-                        return await self._finalize(target, asset, job, cancellation)
+                        return await self._finalize(
+                            target,
+                            asset,
+                            job,
+                            progress,
+                            item,
+                            len(post.assets),
+                            cancellation,
+                        )
                     response.raise_for_status()
                     if _is_hls_playlist(response):
                         target = target.with_suffix(".mp4")
@@ -148,7 +174,15 @@ class HttpDownloadEngine:
                             self._max_file_size,
                             headers,
                         )
-                        return await self._finalize(target, asset, job, cancellation)
+                        return await self._finalize(
+                            target,
+                            asset,
+                            job,
+                            progress,
+                            item,
+                            len(post.assets),
+                            cancellation,
+                        )
                     total = _total_size(response, written)
                     if total and total > self._max_file_size:
                         raise DownloadError(
@@ -161,12 +195,11 @@ class HttpDownloadEngine:
                         digest = hashlib.sha256()
                     started_at = time.monotonic()
                     started_bytes = written
+                    chunks = response.aiter_bytes(256 * 1024)
                     with partial.open(mode) as output:
-                        async for chunk in response.aiter_bytes(256 * 1024):
-                            if await cancellation.requested():
-                                raise DownloadError(
-                                    ErrorCode.CANCELLED, "Download cancelled"
-                                )
+                        while (
+                            chunk := await _next_chunk(chunks, cancellation)
+                        ) is not None:
                             written += len(chunk)
                             if written > self._max_file_size:
                                 raise DownloadError(
@@ -197,10 +230,14 @@ class HttpDownloadEngine:
                                     total_bytes=total,
                                     speed_bytes_per_second=speed or None,
                                     eta_seconds=eta,
+                                    elapsed_seconds=max(0, int(elapsed)),
+                                    indeterminate=total is None,
                                 )
                             )
                     partial.replace(target)
-            return await self._finalize(target, asset, job, cancellation)
+            return await self._finalize(
+                target, asset, job, progress, item, len(post.assets), cancellation
+            )
 
     async def _download_with_ytdlp(
         self,
@@ -221,52 +258,83 @@ class HttpDownloadEngine:
                 sys.executable,
                 "-m",
                 "yt_dlp",
+                "--ignore-config",
                 "--quiet",
                 "--no-warnings",
+                "--progress",
+                "--newline",
+                "--progress-delta",
+                "0.5",
+                "--progress-template",
+                f"download:{_YTDLP_PROGRESS_PREFIX}%(progress)j",
                 "--no-playlist",
                 "--format",
                 asset.format_selector
-                or ("bestaudio/best" if job.audio_only else "best"),
+                or (
+                    "bestaudio[acodec^=mp4a]/bestaudio[acodec^=aac]/"
+                    "bestaudio[acodec=mp3]/bestaudio/best"
+                    if job.audio_only
+                    else "bestvideo+bestaudio[acodec^=mp4a]/"
+                    "bestvideo+bestaudio[acodec^=aac]/"
+                    "bestvideo+bestaudio[acodec=mp3]/bestvideo+bestaudio/best"
+                ),
                 "--max-filesize",
                 str(self._max_file_size),
                 "--output",
                 str(output_template),
                 asset.extractor_url,
             ]
+            command[-3:-3] = [
+                "--format-sort",
+                asset.format_sort
+                or (
+                    "acodec:aac,lang,quality,abr"
+                    if job.audio_only
+                    else "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
+                ),
+            ]
+            if not job.audio_only:
+                command[-3:-3] = [
+                    "--merge-output-format",
+                    "mp4/mkv",
+                    "--postprocessor-args",
+                    "Merger+ffmpeg_o:-movflags +faststart",
+                ]
             command[-3:-3] = self._youtube_extractor_args()
             if cookie_file:
                 command[-1:-1] = ["--cookies", cookie_file]
             process = await asyncio.create_subprocess_exec(
                 *command,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            while process.returncode is None:
-                if await cancellation.requested():
-                    process.terminate()
-                    await process.wait()
-                    _cleanup_ytdlp_files(output_template)
-                    raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
-                await progress(
-                    Progress(
-                        job_id=job.id,
-                        stage=JobStage.DOWNLOADING,
-                        percent=0,
-                        attempt=job.attempt,
-                        item=item,
-                        item_count=item_count,
-                    )
+            assert process.stdout is not None and process.stderr is not None
+            progress_task = asyncio.create_task(
+                _read_ytdlp_progress(
+                    process.stdout, job, item, item_count, progress
                 )
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=0.25)
-                except TimeoutError:
-                    continue
+            )
+            stderr_task = asyncio.create_task(process.stderr.read())
+            try:
+                while process.returncode is None:
+                    if await cancellation.requested():
+                        await _terminate(process)
+                        _cleanup_ytdlp_files(output_template)
+                        raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=0.25)
+                    except TimeoutError:
+                        continue
+                await progress_task
+                detail = (await stderr_task).decode(errors="replace")[-1000:]
+            finally:
+                for task in (progress_task, stderr_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    progress_task, stderr_task, return_exceptions=True
+                )
             if process.returncode:
-                detail = (
-                    (await process.stderr.read()).decode(errors="replace")[-1000:]
-                    if process.stderr
-                    else ""
-                )
                 _cleanup_ytdlp_files(output_template)
                 raise DownloadError(
                     ErrorCode.UNAVAILABLE,
@@ -296,10 +364,16 @@ class HttpDownloadEngine:
                 sys.executable,
                 "-m",
                 "yt_dlp",
+                "--ignore-config",
                 "--dump-single-json",
                 "--no-warnings",
                 "--format",
-                "bestaudio/best",
+                (
+                    "bestaudio[acodec^=mp4a]/bestaudio[acodec^=aac]/"
+                    "bestaudio[acodec=mp3]/bestaudio/best"
+                ),
+                "--format-sort",
+                "acodec:aac,lang,quality,abr",
             ]
             if cookie_file:
                 command.extend(("--cookies", cookie_file))
@@ -364,6 +438,7 @@ class HttpDownloadEngine:
         bridge = asyncio.create_task(_pipe(spotify.stdout, ffmpeg.stdin))
         spotify_stderr = asyncio.create_task(spotify.stderr.read() if spotify.stderr else _empty_bytes())
         ffmpeg_stderr = asyncio.create_task(ffmpeg.stderr.read() if ffmpeg.stderr else _empty_bytes())
+        started_at = time.monotonic()
         try:
             while spotify.returncode is None or ffmpeg.returncode is None:
                 if await cancellation.requested():
@@ -374,6 +449,10 @@ class HttpDownloadEngine:
                     await _terminate(spotify, ffmpeg)
                     target.unlink(missing_ok=True)
                     raise DownloadError(ErrorCode.TOO_LARGE, "Media exceeds the configured size limit")
+                elapsed = max(0.001, time.monotonic() - started_at)
+                downloaded = target.stat().st_size if target.exists() else 0
+                expected = _spotify_expected_bytes(asset.duration_ms)
+                speed = int(downloaded / elapsed)
                 await progress(
                     Progress(
                         job.id,
@@ -382,6 +461,16 @@ class HttpDownloadEngine:
                         attempt=job.attempt,
                         item=item,
                         item_count=len(post.assets),
+                        downloaded_bytes=downloaded,
+                        total_bytes=expected,
+                        speed_bytes_per_second=speed or None,
+                        eta_seconds=(
+                            max(0, int((expected - downloaded) / speed))
+                            if expected and speed
+                            else None
+                        ),
+                        elapsed_seconds=int(elapsed),
+                        indeterminate=expected is None,
                     )
                 )
                 await asyncio.sleep(0.25)
@@ -397,7 +486,9 @@ class HttpDownloadEngine:
                 )
             if not target.exists():
                 raise DownloadError(ErrorCode.PROVIDER_FAILURE, "Native Spotify stream produced no audio")
-            return await self._finalize(target, asset, job, cancellation)
+            return await self._finalize(
+                target, asset, job, progress, item, len(post.assets), cancellation
+            )
         finally:
             if spotify.returncode is None or ffmpeg.returncode is None:
                 await _terminate(spotify, ffmpeg)
@@ -406,17 +497,74 @@ class HttpDownloadEngine:
                     task.cancel()
 
 
-    async def _finalize(self, target: Path, asset, job: Job, cancellation) -> DownloadArtifact:
+    async def _finalize(
+        self,
+        target: Path,
+        asset,
+        job: Job,
+        progress,
+        item: int,
+        item_count: int,
+        cancellation,
+    ) -> DownloadArtifact:
         kind = MediaKind.AUDIO if job.audio_only else asset.kind
-        if kind is MediaKind.AUDIO:
+        audio_strategy = (
+            await _audio_strategy(target)
+            if kind is MediaKind.AUDIO and not job.preferences.document_mode
+            else None
+        )
+        video_strategy = (
+            await _video_strategy(target)
+            if kind is MediaKind.VIDEO and not job.preferences.document_mode
+            else None
+        )
+        processing_detail = (
+            "preparing_document"
+            if job.preferences.document_mode
+            else "converting_audio"
+            if audio_strategy == "transcode"
+            else "converting_video"
+            if video_strategy in {"transcode_audio", "transcode_video", "transcode"}
+            else f"preparing_{kind.value}"
+        )
+
+        async def report_processing(elapsed_seconds: int = 0) -> None:
+            await progress(
+                Progress(
+                    job_id=job.id,
+                    stage=JobStage.PROCESSING,
+                    attempt=job.attempt,
+                    item=item,
+                    item_count=item_count,
+                    detail=processing_detail,
+                    elapsed_seconds=elapsed_seconds,
+                    indeterminate=True,
+                )
+            )
+
+        await report_processing()
+        if kind is MediaKind.AUDIO and not job.preferences.document_mode:
             target = await _transcode_audio(
                 target,
                 cancellation,
                 title=asset.title,
                 author=asset.author,
+                report=report_processing,
+                strategy=audio_strategy,
             )
-        elif kind is MediaKind.VIDEO:
-            target = await _transcode_video(target, cancellation)
+        elif kind is MediaKind.VIDEO and not job.preferences.document_mode:
+            target = await _transcode_video(
+                target,
+                cancellation,
+                report=report_processing,
+                strategy=video_strategy,
+            )
+        if target.stat().st_size > self._max_file_size:
+            target.unlink(missing_ok=True)
+            raise DownloadError(
+                ErrorCode.TOO_LARGE,
+                "Prepared media exceeds the configured size limit",
+            )
         digest = hashlib.sha256()
         with target.open("rb") as source:
             while chunk := source.read(1024 * 1024):
@@ -491,12 +639,117 @@ def _asset_path(
 
 
 def _spotify_stream_percent(target: Path, duration_ms: int | None) -> int:
-    if not duration_ms or not target.exists():
-        return 0
-    expected_bytes = duration_ms * 44_100 * 2 * 2 // 1_000
-    if expected_bytes <= 0:
+    expected_bytes = _spotify_expected_bytes(duration_ms)
+    if not expected_bytes or not target.exists():
         return 0
     return min(99, int(target.stat().st_size * 100 / expected_bytes))
+
+
+async def _next_chunk(chunks, cancellation) -> bytes | None:
+    task = asyncio.create_task(anext(chunks))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {task}, timeout=_CANCELLATION_POLL_SECONDS
+            )
+            if task in done:
+                try:
+                    return task.result()
+                except StopAsyncIteration:
+                    return None
+            if await cancellation.requested():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def _spotify_expected_bytes(duration_ms: int | None) -> int | None:
+    if not duration_ms:
+        return None
+    expected = duration_ms * 44_100 * 2 * 2 // 1_000
+    return expected if expected > 0 else None
+
+
+async def _read_ytdlp_progress(
+    stream: asyncio.StreamReader,
+    job: Job,
+    item: int,
+    item_count: int,
+    report,
+) -> None:
+    while line := await stream.readline():
+        value = line.decode(errors="replace").strip()
+        if not value.startswith(_YTDLP_PROGRESS_PREFIX):
+            continue
+        try:
+            data = json.loads(value.removeprefix(_YTDLP_PROGRESS_PREFIX))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        event = _ytdlp_progress_event(data, job, item, item_count)
+        if event is not None:
+            await report(event)
+
+
+def _ytdlp_progress_event(
+    data: object, job: Job, item: int, item_count: int
+) -> Progress | None:
+    if not isinstance(data, dict) or data.get("status") not in {
+        "downloading",
+        "finished",
+    }:
+        return None
+    downloaded = _positive_int(data.get("downloaded_bytes"), allow_zero=True)
+    exact_total = _positive_int(data.get("total_bytes"))
+    estimated_total = _positive_int(data.get("total_bytes_estimate"))
+    total = exact_total or estimated_total
+    percent_value = _number(data.get("_percent"))
+    fragment_index = _positive_int(data.get("fragment_index"), allow_zero=True)
+    fragment_count = _positive_int(data.get("fragment_count"))
+    determinate = total is not None or percent_value is not None or (
+        fragment_index is not None and fragment_count is not None
+    )
+    if downloaded is not None and total:
+        percent = int(downloaded * 100 / total)
+    elif percent_value is not None:
+        percent = int(percent_value)
+    elif fragment_index is not None and fragment_count:
+        percent = int(fragment_index * 100 / fragment_count)
+    else:
+        percent = 0
+    return Progress(
+        job_id=job.id,
+        stage=JobStage.DOWNLOADING,
+        percent=max(0, min(99, percent)),
+        attempt=job.attempt,
+        item=item,
+        item_count=item_count,
+        downloaded_bytes=downloaded,
+        total_bytes=total,
+        total_bytes_is_estimate=exact_total is None and estimated_total is not None,
+        speed_bytes_per_second=_positive_int(data.get("speed")),
+        eta_seconds=_positive_int(data.get("eta"), allow_zero=True),
+        elapsed_seconds=_positive_int(data.get("elapsed"), allow_zero=True),
+        indeterminate=not determinate,
+    )
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _positive_int(value: object, *, allow_zero: bool = False) -> int | None:
+    number = _number(value)
+    if number is None or number < 0 or (number == 0 and not allow_zero):
+        return None
+    return int(number)
 
 
 def _cleanup_ytdlp_files(output_template: Path) -> None:
@@ -562,6 +815,8 @@ async def _download_hls(
             source_url,
             "-c",
             "copy",
+            "-movflags",
+            "+faststart",
             str(partial),
         )
     )
@@ -570,6 +825,7 @@ async def _download_hls(
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
+    started_at = time.monotonic()
     while process.returncode is None:
         if await cancellation.requested():
             process.terminate()
@@ -584,6 +840,8 @@ async def _download_hls(
                 ErrorCode.TOO_LARGE,
                 "Media exceeds the configured size limit",
             )
+        elapsed = max(0.001, time.monotonic() - started_at)
+        downloaded = partial.stat().st_size if partial.exists() else 0
         await progress(
             Progress(
                 job_id=job.id,
@@ -592,6 +850,10 @@ async def _download_hls(
                 attempt=job.attempt,
                 item=item,
                 item_count=item_count,
+                downloaded_bytes=downloaded,
+                speed_bytes_per_second=int(downloaded / elapsed) or None,
+                elapsed_seconds=int(elapsed),
+                indeterminate=True,
             )
         )
         try:
@@ -623,19 +885,40 @@ async def _transcode_audio(
     *,
     title: str | None = None,
     author: str | None = None,
+    report=None,
+    strategy: str | None = None,
 ) -> Path:
-    output = target.with_name(f"{target.stem}.converted.m4a")
-    final = target.with_suffix(".m4a")
+    strategy = strategy or await _audio_strategy(target)
+    if strategy == "passthrough":
+        return target
+    if strategy == "rename_mp3":
+        final = target.with_suffix(".mp3")
+        target.replace(final)
+        return final
+    output_suffix = ".mp3" if strategy == "remux_mp3" else ".m4a"
+    output = target.with_name(f"{target.stem}.converted{output_suffix}")
+    final = target.with_suffix(output_suffix)
+    codec_args = (
+        ("-codec:a", "copy")
+        if strategy in {"remux", "remux_mp3"}
+        else (
+            "-codec:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-aac_coder",
+            "fast",
+        )
+    )
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
         "-i",
         str(target),
         "-vn",
-        "-codec:a",
-        "aac",
-        "-profile:a",
-        "aac_low",
+        "-map",
+        "0:a:0",
+        *codec_args,
         "-map_metadata",
         "0",
         "-metadata",
@@ -646,12 +929,15 @@ async def _transcode_audio(
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
+    started_at = time.monotonic()
     while process.returncode is None:
         if await cancellation.requested():
             process.terminate()
             await process.wait()
             output.unlink(missing_ok=True)
             raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+        if report is not None:
+            await report(max(0, int(time.monotonic() - started_at)))
         try:
             await asyncio.wait_for(process.wait(), timeout=0.25)
         except TimeoutError:
@@ -664,6 +950,15 @@ async def _transcode_audio(
             else ""
         )
         output.unlink(missing_ok=True)
+        if strategy in {"remux", "remux_mp3"}:
+            return await _transcode_audio(
+                target,
+                cancellation,
+                title=title,
+                author=author,
+                report=report,
+                strategy="transcode",
+            )
         raise DownloadError(
             ErrorCode.PROVIDER_FAILURE,
             detail or "Audio conversion failed",
@@ -672,6 +967,50 @@ async def _transcode_audio(
     target.unlink(missing_ok=True)
     output.replace(final)
     return final
+
+
+async def _audio_strategy(target: Path) -> str:
+    """Choose the cheapest conversion that works in Telegram's music player."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name:format=format_name",
+            "-of",
+            "json",
+            str(target),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode:
+            return "transcode"
+        probe = json.loads(stdout)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return "transcode"
+
+    streams = probe.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return "transcode"
+    first = streams[0]
+    codec = first.get("codec_name") if isinstance(first, dict) else None
+    formats = set(str(probe.get("format", {}).get("format_name", "")).split(","))
+    suffix = target.suffix.lower()
+    if codec == "aac" and suffix == ".m4a" and formats & {"mov", "mp4", "m4a"}:
+        return "passthrough"
+    if codec == "mp3" and suffix == ".mp3" and "mp3" in formats:
+        return "passthrough"
+    if codec == "mp3" and "mp3" in formats:
+        return "rename_mp3"
+    if codec == "mp3":
+        return "remux_mp3"
+    if codec == "aac":
+        return "remux"
+    return "transcode"
 
 
 async def _empty_bytes() -> bytes:
@@ -694,18 +1033,52 @@ async def _terminate(*processes: asyncio.subprocess.Process) -> None:
     await asyncio.gather(*(process.wait() for process in processes), return_exceptions=True)
 
 
-async def _transcode_video(target: Path, cancellation) -> Path:
+async def _transcode_video(
+    target: Path, cancellation, *, report=None, strategy: str | None = None
+) -> Path:
     output = target.with_name(f"{target.stem}.converted.mp4")
     final = target.with_suffix(".mp4")
-    stream_copy = await _is_telegram_compatible_video(target)
-    codec_args = (
+    strategy = strategy or await _video_strategy(target)
+    if strategy == "passthrough":
+        return target
+    codec_args: tuple[str, ...] = (
         ("-codec", "copy")
-        if stream_copy
+        if strategy == "remux"
+        else (
+            "-codec:v",
+            "copy",
+            "-codec:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-aac_coder",
+            "fast",
+        )
+        if strategy == "transcode_audio"
         else (
             "-codec:v",
             "libx264",
             "-preset",
             "veryfast",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "2",
+            "-crf",
+            "23",
+            "-codec:a",
+            "copy",
+        )
+        if strategy == "transcode_video"
+        else (
+            "-codec:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
             "-pix_fmt",
             "yuv420p",
             "-threads",
@@ -716,6 +1089,8 @@ async def _transcode_video(target: Path, cancellation) -> Path:
             "aac",
             "-profile:a",
             "aac_low",
+            "-aac_coder",
+            "fast",
         )
     )
     process = await asyncio.create_subprocess_exec(
@@ -726,7 +1101,7 @@ async def _transcode_video(target: Path, cancellation) -> Path:
         "-map",
         "0:v:0",
         "-map",
-        "0:a?",
+        "0:a:0?",
         *codec_args,
         "-movflags",
         "+faststart",
@@ -734,12 +1109,15 @@ async def _transcode_video(target: Path, cancellation) -> Path:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
+    started_at = time.monotonic()
     while process.returncode is None:
         if await cancellation.requested():
             process.terminate()
             await process.wait()
             output.unlink(missing_ok=True)
             raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+        if report is not None:
+            await report(max(0, int(time.monotonic() - started_at)))
         try:
             await asyncio.wait_for(process.wait(), timeout=0.25)
         except TimeoutError:
@@ -752,6 +1130,18 @@ async def _transcode_video(target: Path, cancellation) -> Path:
             else ""
         )
         output.unlink(missing_ok=True)
+        fallback = {
+            "remux": "transcode_audio",
+            "transcode_audio": "transcode",
+            "transcode_video": "transcode",
+        }.get(strategy)
+        if fallback is not None:
+            return await _transcode_video(
+                target,
+                cancellation,
+                report=report,
+                strategy=fallback,
+            )
         raise DownloadError(
             ErrorCode.PROVIDER_FAILURE,
             detail or "Video conversion failed",
@@ -764,6 +1154,10 @@ async def _transcode_video(target: Path, cancellation) -> Path:
 
 async def _is_telegram_compatible_video(target: Path) -> bool:
     """Return whether an MP4 can be prepared with a metadata-only remux."""
+    return await _video_strategy(target) in {"passthrough", "remux"}
+
+
+async def _video_strategy(target: Path) -> str:
     try:
         process = await asyncio.create_subprocess_exec(
             "ffprobe",
@@ -779,34 +1173,73 @@ async def _is_telegram_compatible_video(target: Path) -> bool:
         )
         stdout, _ = await process.communicate()
         if process.returncode:
-            return False
+            return "transcode"
         probe = json.loads(stdout)
     except (OSError, json.JSONDecodeError, TypeError):
-        return False
+        return "transcode"
 
     formats = set(str(probe.get("format", {}).get("format_name", "")).split(","))
     streams = probe.get("streams")
     if not isinstance(streams, list):
-        return False
-    video_codecs = {
-        stream.get("codec_name")
-        for stream in streams
-        if isinstance(stream, dict) and stream.get("codec_type") == "video"
-    }
-    audio_codecs = {
-        stream.get("codec_name")
-        for stream in streams
-        if isinstance(stream, dict) and stream.get("codec_type") == "audio"
-    }
-    video_pixel_formats = {
-        stream.get("pix_fmt")
-        for stream in streams
-        if isinstance(stream, dict) and stream.get("codec_type") == "video"
-    }
-    return (
-        bool(formats & {"mp4", "mov"})
-        and video_codecs == {"h264"}
-        and video_pixel_formats <= {"yuv420p", "yuvj420p"}
-        and bool(video_pixel_formats)
-        and (not audio_codecs or audio_codecs == {"aac"})
+        return "transcode"
+    video_stream = next(
+        (
+            stream
+            for stream in streams
+            if isinstance(stream, dict) and stream.get("codec_type") == "video"
+        ),
+        None,
     )
+    audio_stream = next(
+        (
+            stream
+            for stream in streams
+            if isinstance(stream, dict) and stream.get("codec_type") == "audio"
+        ),
+        None,
+    )
+    video_compatible = (
+        video_stream is not None
+        and video_stream.get("codec_name") == "h264"
+        and video_stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}
+    )
+    audio_compatible = audio_stream is None or audio_stream.get("codec_name") == "aac"
+    if video_compatible and audio_compatible:
+        if (
+            bool(formats & {"mp4", "mov"})
+            and target.suffix.lower() == ".mp4"
+            and _mp4_is_faststart(target)
+        ):
+            return "passthrough"
+        return "remux"
+    if video_compatible:
+        return "transcode_audio"
+    if audio_compatible:
+        return "transcode_video"
+    return "transcode"
+
+
+def _mp4_is_faststart(target: Path) -> bool:
+    """Return whether the MP4 metadata atom appears before media payload."""
+    try:
+        with target.open("rb") as source:
+            while header := source.read(8):
+                if len(header) != 8:
+                    return False
+                size = int.from_bytes(header[:4], "big")
+                atom = header[4:]
+                header_size = 8
+                if size == 1:
+                    extended = source.read(8)
+                    if len(extended) != 8:
+                        return False
+                    size = int.from_bytes(extended, "big")
+                    header_size = 16
+                if atom == b"moov":
+                    return True
+                if atom == b"mdat" or size < header_size:
+                    return False
+                source.seek(size - header_size, 1)
+    except OSError:
+        return False
+    return False

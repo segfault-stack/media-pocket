@@ -48,7 +48,8 @@ HELP_TEXT = (
     "Social: TikTok, Instagram, X, Threads, and Pinterest.\n"
     "Audio: Spotify, SoundCloud, HitMoz, and Zaycev.</blockquote>\n"
     "<blockquote expandable><b>Formats</b>\nUse the picker for Video, Audio, Media, "
-    "quality, and Media/File delivery. Use <code>/audio URL</code> or "
+    "and Media/File delivery. Compatible quality is selected automatically. "
+    "Use <code>/audio URL</code> or "
     "<code>/video URL</code> to skip confirmation.</blockquote>\n"
     "<blockquote expandable><b>Batch & inline</b>\nPut several links in one message to "
     "apply one choice to all. Type the bot username plus a link to use inline mode.</blockquote>\n"
@@ -288,7 +289,7 @@ ERROR_CARDS = {
     ),
     ErrorCode.TOO_LARGE: (
         "The file exceeds Telegram’s size limit.",
-        "Choose a lower quality or audio format.",
+        "Try the audio format instead.",
     ),
     ErrorCode.UNAVAILABLE: (
         "This media is unavailable.",
@@ -375,8 +376,6 @@ def render_selection(selection: SelectionRequest) -> str:
     else:
         lines = [f"<b>⬇️ Download from {escape(platforms)}</b>"]
     summary = [_mode_name(selection.mode)]
-    if _has_quality(selection):
-        summary.append(_quality_name(selection.quality))
     summary.append(_delivery_name(selection.delivery))
     lines.extend(
         [
@@ -485,19 +484,6 @@ def selection_keyboard(selection: SelectionRequest) -> InlineKeyboardMarkup:
                 ),
             ]
         )
-        if _has_quality(selection):
-            rows.append(
-                [
-                    _choice(
-                        _quality_name(value),
-                        "quality",
-                        value,
-                        token,
-                        selection.quality == value,
-                    )
-                    for value in ("best", "1080", "720", "480")
-                ]
-            )
     if all(item in AUDIO_PLATFORMS for item in selection.platforms):
         rows.append([_choice("📄 As file", "delivery", "file", token, True)])
     else:
@@ -540,17 +526,34 @@ def render_progress(progress: Progress, *, compact: bool = False) -> str:
             f"<b>{STAGE_LABELS[progress.stage]}</b>\n{reason}\n\n<b>Next:</b> {action}"
         )
     title = STAGE_LABELS[progress.stage]
+    if progress.stage is JobStage.PROCESSING:
+        title = {
+            "converting_audio": "🎧 Converting audio",
+            "converting_video": "🎬 Converting video",
+            "preparing_audio": "🎧 Preparing audio",
+            "preparing_video": "🎬 Preparing video",
+            "preparing_photo": "🖼️ Preparing photo",
+            "preparing_document": "📄 Preparing file",
+        }.get(progress.detail, title)
     if progress.stage is JobStage.QUEUED and progress.queue_position is not None:
         title += f" · #{progress.queue_position}"
     if progress.stage is JobStage.RETRYING:
         title += f" · {progress.attempt}/{progress.attempt_limit}"
-    if progress.stage is JobStage.DOWNLOADING:
+    if progress.stage is JobStage.DOWNLOADING and not progress.indeterminate:
         title += f" {progress.percent}%"
+    if progress.stage is JobStage.RESOLVING and progress.elapsed_seconds:
+        title += f" · {_duration(progress.elapsed_seconds)}"
     if progress.item_count > 1:
         title += f" · {max(1, progress.item)} of {progress.item_count}"
-    if compact or progress.stage not in {JobStage.DOWNLOADING, JobStage.PROCESSING}:
+    visual_stages = {JobStage.RESOLVING, JobStage.DOWNLOADING, JobStage.PROCESSING}
+    if compact or progress.stage not in visual_stages:
         return f"<b>{title}</b>"
-    lines = [f"<b>{title}</b>", _progress_bar(progress.percent)]
+    bar = (
+        _activity_bar(progress.elapsed_seconds or 0)
+        if progress.indeterminate
+        else _progress_bar(progress.percent)
+    )
+    lines = [f"<b>{title}</b>", bar]
     if metrics := _progress_metrics(progress):
         lines.append(metrics)
     return "\n".join(lines)
@@ -590,7 +593,7 @@ def render_status(jobs: tuple[Job, ...]) -> str:
 def status_keyboard(jobs: tuple[Job, ...]) -> InlineKeyboardMarkup | None:
     rows = []
     for job in jobs:
-        if not job.terminal:
+        if not job.terminal and not job.cancel_requested:
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -615,7 +618,7 @@ def settings_home_text(value: UserPreferences) -> str:
     return (
         "<b>⚙️ Settings</b>\nChoose a category. Changes are saved immediately.\n\n"
         f"YouTube: {_youtube_mode_name(value.youtube_mode)} · "
-        f"{_quality_name(value.quality)} · {'File' if value.document_mode else 'Media'}"
+        f"{'File' if value.document_mode else 'Media'}"
     )
 
 
@@ -624,7 +627,7 @@ def settings_home_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🎬 Download & Quality", callback_data="settings:page:download"
+                    text="🎬 YouTube mode", callback_data="settings:page:download"
                 )
             ],
             [
@@ -646,11 +649,11 @@ def settings_page(
 ) -> tuple[str, InlineKeyboardMarkup]:
     if page == "download":
         text = (
-            "<b>🎬 Download & Quality</b>\n"
+            "<b>🎬 YouTube mode</b>\n"
             "YouTube links start immediately unless Always ask is selected. "
-            "Audio-first services keep their natural audio mode.\n\n"
-            f"YouTube: {_youtube_mode_name(value.youtube_mode)}\n"
-            f"Video quality: {_quality_name(value.quality)}"
+            "Audio-first services keep their natural audio mode. "
+            "Quality is selected automatically to avoid unnecessary conversion.\n\n"
+            f"YouTube: {_youtube_mode_name(value.youtube_mode)}"
         )
         rows = [
             [
@@ -658,10 +661,6 @@ def settings_page(
                 _youtube_setting("🎧 Audio", "audio", value.youtube_mode == "audio"),
             ],
             [_youtube_setting("💬 Always ask", "ask", value.youtube_mode == "ask")],
-            [
-                _quality_setting(item, value.quality == item)
-                for item in ("best", "1080", "720", "480")
-            ],
         ]
     elif page == "delivery":
         text = f"<b>📦 Delivery</b>\nChoose how completed downloads are sent.\n\nDelivery: {'File' if value.document_mode else 'Media'}\nResult actions: {_on_off(value.show_buttons)}"
@@ -708,13 +707,6 @@ def _toggle_setting(label: str, field: str, selected: bool) -> InlineKeyboardBut
     )
 
 
-def _quality_setting(value: str, selected: bool) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=("✓ " if selected else "") + _quality_name(value),
-        callback_data=f"settings:quality:{value}",
-    )
-
-
 def _youtube_setting(label: str, value: str, selected: bool) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=("✓ " if selected else "") + label,
@@ -725,12 +717,6 @@ def _youtube_setting(label: str, value: str, selected: bool) -> InlineKeyboardBu
 def _youtube_mode_name(value: str) -> str:
     return {"video": "Video", "audio": "Audio", "ask": "Always ask"}.get(
         value, "Video"
-    )
-
-
-def _has_quality(selection: SelectionRequest) -> bool:
-    return selection.mode is SelectionMode.VIDEO and not any(
-        item in SOCIAL_PLATFORMS | AUDIO_PLATFORMS for item in selection.platforms
     )
 
 
@@ -752,10 +738,6 @@ def _delivery_name(delivery: DeliveryMode) -> str:
     return "📄 As file" if delivery is DeliveryMode.FILE else "▶️ In chat"
 
 
-def _quality_name(value: str) -> str:
-    return "Best" if value == "best" else f"{value}p"
-
-
 def _short_url(url: str, limit: int = 52) -> str:
     parsed = urlsplit(url)
     value = f"{parsed.hostname or ''}{parsed.path or ''}"
@@ -769,17 +751,29 @@ def _progress_bar(percent: int) -> str:
     return "▰" * filled + "▱" * (10 - filled)
 
 
+def _activity_bar(elapsed_seconds: int) -> str:
+    span = 8
+    offset = max(0, elapsed_seconds) % (span * 2)
+    position = offset if offset <= span else span * 2 - offset
+    cells = ["▱"] * 10
+    cells[position : position + 2] = ["▰", "▰"]
+    return "".join(cells)
+
+
 def _progress_metrics(progress: Progress) -> str:
     parts = []
     if progress.downloaded_bytes is not None:
         size = _bytes(progress.downloaded_bytes)
         if progress.total_bytes:
-            size += f" / {_bytes(progress.total_bytes)}"
+            marker = "~" if progress.total_bytes_is_estimate else ""
+            size += f" / {marker}{_bytes(progress.total_bytes)}"
         parts.append(size)
     if progress.speed_bytes_per_second:
         parts.append(f"{_bytes(progress.speed_bytes_per_second)}/s")
     if progress.eta_seconds is not None:
         parts.append(f"ETA {_duration(progress.eta_seconds)}")
+    elif progress.elapsed_seconds is not None:
+        parts.append(f"{_duration(progress.elapsed_seconds)} elapsed")
     return " · ".join(parts)
 
 

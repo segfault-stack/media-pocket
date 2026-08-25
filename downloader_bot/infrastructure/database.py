@@ -563,6 +563,7 @@ class SqlJobRepository:
                 .where(
                     JobRow.id == job_id,
                     JobRow.user_id == user_id,
+                    JobRow.cancel_requested.is_(False),
                     JobRow.stage.not_in(
                         [
                             item.value

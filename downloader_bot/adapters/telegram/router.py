@@ -206,18 +206,6 @@ def build_router(
             ):
                 changes[parts[2]] = parts[3] == "true"
             elif (
-                parts[1] == "quality"
-                and len(parts) == 3
-                and parts[2]
-                in {
-                    "best",
-                    "1080",
-                    "720",
-                    "480",
-                }
-            ):
-                changes["quality"] = parts[2]
-            elif (
                 parts[1] == "youtube"
                 and len(parts) == 3
                 and parts[2] in {"video", "audio", "ask"}
@@ -551,7 +539,9 @@ def build_router(
                 job,
                 Progress(
                     job_id=job.id,
-                    stage=job.stage,
+                    stage=(
+                        job.stage if job.terminal else JobStage.CANCELLING
+                    ),
                     percent=100 if job.terminal else 0,
                     item_count=job.children_total or 1,
                     error_code=job.error_code,
@@ -812,7 +802,7 @@ def _extract_urls(text: str | None) -> tuple[str, ...]:
 
 
 def _settings_page_for(field: str) -> str:
-    if field in {"quality", "default_audio_only", "youtube_mode"}:
+    if field in {"default_audio_only", "youtube_mode"}:
         return "download"
     if field in {"document_mode", "show_buttons"}:
         return "delivery"

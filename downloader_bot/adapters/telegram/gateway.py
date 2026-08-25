@@ -274,7 +274,7 @@ class AiogramTelegramGateway:
 
 
 def _status_keyboard(job: Job) -> InlineKeyboardMarkup | None:
-    if job.terminal:
+    if job.terminal or job.cancel_requested:
         return None
     rows = [
         [InlineKeyboardButton(text="✖️ Cancel", callback_data=f"job:cancel:{job.id}")]

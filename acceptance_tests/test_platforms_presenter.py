@@ -127,7 +127,14 @@ async def test_ytdlp_fixture_maps_album_assets_and_photos(monkeypatch) -> None:
         "title": "album",
         "entries": [
             {"url": "https://cdn/x.jpg", "ext": "jpg"},
-            {"url": "https://cdn/y.mp4", "ext": "mp4", "vcodec": "h264"},
+            {
+                "ext": "mp4",
+                "vcodec": "h264",
+                "requested_downloads": [
+                    {"url": "https://cdn/video.mp4", "ext": "mp4"},
+                    {"url": "https://cdn/audio.m4a", "ext": "m4a"},
+                ],
+            },
         ],
     }
 
@@ -145,6 +152,8 @@ async def test_ytdlp_fixture_maps_album_assets_and_photos(monkeypatch) -> None:
         "https://instagram.com/p/x", UserPreferences(quality="720")
     )
     assert [asset.kind for asset in post.assets] == [MediaKind.PHOTO, MediaKind.VIDEO]
+    assert not post.assets[0].requires_extractor_download
+    assert post.assets[1].requires_extractor_download
 
 
 @pytest.mark.asyncio
@@ -177,6 +186,35 @@ async def test_ytdlp_uses_explicit_playlist_policy(
     )
     assert expected in command
     assert excluded not in command
+    assert "--ignore-config" in command
+    assert command[command.index("--format-sort") + 1].startswith("vcodec:h264")
+    assert command[command.index("--merge-output-format") + 1] == "mp4/mkv"
+
+
+@pytest.mark.asyncio
+async def test_youtube_audio_prefers_aac_without_requiring_an_extension(
+    monkeypatch,
+) -> None:
+    command = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"url":"https://cdn.example/audio.m4a","ext":"m4a"}', b""
+
+    async def create(*args, **_kwargs):
+        command.extend(args)
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    await YtDlpPlatformAdapter(Platform.YOUTUBE).resolve(
+        "https://youtu.be/video", UserPreferences(), audio_only=True
+    )
+    selector = command[command.index("--format") + 1]
+    assert selector.startswith("bestaudio[acodec^=mp4a]")
+    assert "bestaudio[acodec=mp3]" in selector
+    assert command[command.index("--format-sort") + 1].startswith("acodec:aac")
 
 
 @pytest.mark.asyncio
@@ -832,6 +870,7 @@ def test_provider_specific_selection_cards(platform, mode, expected, excluded) -
     )
     if excluded:
         assert excluded not in labels
+    assert not any(label in labels for label in ("Best", "1080p", "720p", "480p"))
 
 
 def test_audio_selection_hides_video_quality_and_uses_compact_actions() -> None:
@@ -965,3 +1004,39 @@ def test_progress_renders_structured_metrics_and_batch_counter() -> None:
     assert "64.0 MB / 100.0 MB" in rendered
     assert "8.0 MB/s" in rendered
     assert "ETA 5s" in rendered
+
+
+def test_progress_renders_truthful_indeterminate_activity() -> None:
+    resolving = render_progress(
+        Progress(
+            "job",
+            JobStage.RESOLVING,
+            elapsed_seconds=12,
+            indeterminate=True,
+        )
+    )
+    downloading = render_progress(
+        Progress(
+            "job",
+            JobStage.DOWNLOADING,
+            downloaded_bytes=12 * 1024 * 1024,
+            speed_bytes_per_second=2 * 1024 * 1024,
+            elapsed_seconds=6,
+            indeterminate=True,
+        )
+    )
+    assert "Checking the link · 12s" in resolving
+    assert "▰▰" in resolving
+    assert "0%" not in downloading
+    assert "12.0 MB" in downloading
+    assert "2.0 MB/s" in downloading
+    assert "6s elapsed" in downloading
+    assert "Converting audio" in render_progress(
+        Progress(
+            "job",
+            JobStage.PROCESSING,
+            detail="converting_audio",
+            elapsed_seconds=7,
+            indeterminate=True,
+        )
+    )

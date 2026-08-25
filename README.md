@@ -39,14 +39,14 @@ The bot and workers run as separate processes. PostgreSQL stores canonical state
 
 | Category | Sources | Available handling |
 | --- | --- | --- |
-| Video | YouTube | video, audio, playlists, quality selection, per-user default |
+| Video | YouTube | video, audio, playlists, automatic compatible formats, per-user mode |
 | Social | TikTok, Instagram, X / Twitter, Threads, Pinterest | media-first delivery, audio extraction, files, provider collections |
 | Audio | Spotify, SoundCloud, Zaycev.net, HitMoz | tracks, albums and playlists where supported, native Spotify audio or fallback |
 | Generic | HTTP(S) links | format detection and yt-dlp resolution where supported |
 
-Video sources can offer **Video** or **Audio**, **Best / 1080p / 720p / 480p**, and **Media** or **File** delivery where those choices apply. Social posts do not show a fake resolution selector. Audio-first providers expose only relevant controls.
+Video sources can offer **Video** or **Audio** and **Media** or **File** delivery where those choices apply. MediaPocket automatically selects the best practical source format and prefers native Telegram playback over expensive transcoding. **File** delivery preserves the downloaded source whenever possible. Audio-first providers expose only relevant controls.
 
-Video is normalized to streaming-compatible MP4 with H.264/AAC. Audio is normalized to M4A with AAC-LC and includes title, performer, duration, and thumbnail metadata when the provider supplies it.
+For in-chat playback, MediaPocket prefers source H.264/AAC video and M4A/AAC or MP3 audio. It remuxes compatible streams without re-encoding, converts only an incompatible stream when possible, and falls back to full conversion only when Telegram needs it. Audio includes title, performer, duration, and thumbnail metadata when the provider supplies it.
 
 ## 🔄 Download flow
 
@@ -133,7 +133,7 @@ Open the bot, run `/admin`, create an invitation code, and redeem it from each a
 | --- | --- |
 | `/start` | onboarding, inline shortcut, settings, help, group installation, and sharing |
 | `/help` | platforms, formats, batches, inline mode, and limitations |
-| `/settings` | YouTube default, quality, delivery, result actions, cleanup, and progress detail |
+| `/settings` | YouTube mode, delivery, result actions, cleanup, and progress detail |
 | `/status` | the current user's active and recent jobs, cancellation, and retry |
 | `/audio URL` | download immediately as audio |
 | `/video URL` | download immediately as video |

@@ -249,6 +249,7 @@ async def test_gateway_manual_retry_supports_chat_and_inline() -> None:
 def test_gateway_keyboard_and_media_strategies() -> None:
     job = Job("job", 1, 2, "https://example.com", "key")
     assert len(_status_keyboard(job).inline_keyboard) == 2
+    assert _status_keyboard(replace(job, cancel_requested=True)) is None
     assert _status_keyboard(replace(job, stage=JobStage.DELIVERED)) is None
     assert _source_keyboard(job.source_url).inline_keyboard[0][0].url == job.source_url
     prefs = UserPreferences()

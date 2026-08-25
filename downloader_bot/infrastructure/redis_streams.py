@@ -87,8 +87,11 @@ class RedisProgressBus:
             "error_code": progress.error_code.value if progress.error_code else None,
             "downloaded_bytes": progress.downloaded_bytes,
             "total_bytes": progress.total_bytes,
+            "total_bytes_is_estimate": progress.total_bytes_is_estimate,
             "speed_bytes_per_second": progress.speed_bytes_per_second,
             "eta_seconds": progress.eta_seconds,
+            "elapsed_seconds": progress.elapsed_seconds,
+            "indeterminate": progress.indeterminate,
             "occurred_at": progress.occurred_at.isoformat(),
         }
         await self._redis.xadd(
@@ -121,8 +124,13 @@ class RedisProgressBus:
                     else None,
                     downloaded_bytes=data.get("downloaded_bytes"),
                     total_bytes=data.get("total_bytes"),
+                    total_bytes_is_estimate=data.get(
+                        "total_bytes_is_estimate", False
+                    ),
                     speed_bytes_per_second=data.get("speed_bytes_per_second"),
                     eta_seconds=data.get("eta_seconds"),
+                    elapsed_seconds=data.get("elapsed_seconds"),
+                    indeterminate=data.get("indeterminate", False),
                 )
                 await self._redis.xack(self._stream, self._group, message_id)
 

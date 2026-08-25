@@ -187,8 +187,11 @@ async def _present_progress(container, gateway, deliver, throttles, progress) ->
                 error_code=progress.error_code,
                 downloaded_bytes=progress.downloaded_bytes,
                 total_bytes=progress.total_bytes,
+                total_bytes_is_estimate=progress.total_bytes_is_estimate,
                 speed_bytes_per_second=progress.speed_bytes_per_second,
                 eta_seconds=progress.eta_seconds,
+                elapsed_seconds=progress.elapsed_seconds,
+                indeterminate=progress.indeterminate,
             )
     throttle = throttles.setdefault(job.id, ProgressThrottle(SystemClock()))
     if throttle.accept(progress):

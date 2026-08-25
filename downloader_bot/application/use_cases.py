@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -12,6 +13,7 @@ from downloader_bot.domain import (
     Job,
     JobKind,
     JobStage,
+    MediaPost,
     PlaylistScope,
     Progress,
     SelectionMode,
@@ -30,6 +32,7 @@ from .ports import (
     JobQueue,
     JobRepository,
     MediaCacheRepository,
+    PlatformAdapter,
     PlatformRegistry,
     ProgressBus,
     SelectionRepository,
@@ -37,6 +40,8 @@ from .ports import (
     TelegramGateway,
     UserRepository,
 )
+
+_RESOLVE_PROGRESS_INTERVAL_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,9 +125,7 @@ class SubmitDownload:
     ) -> Job:
         url = _validated_url(command.url)
         await self._users.ensure(command.user_id)
-        preferences = await self._settings.get(command.user_id)
-        if command.quality is not None:
-            preferences = replace(preferences, quality=command.quality)
+        preferences = replace(await self._settings.get(command.user_id), quality="best")
         if command.document_mode is not None:
             preferences = replace(preferences, document_mode=command.document_mode)
         preferences = replace(preferences, include_playlist=command.include_playlist)
@@ -220,8 +223,7 @@ class SubmitBatch:
         now = self._clock.now()
         parent_id = self._ids.new()
         preferences = await self._settings.get(user_id)
-        if quality is not None:
-            preferences = replace(preferences, quality=quality)
+        preferences = replace(preferences, quality="best")
         if document_mode is not None:
             preferences = replace(preferences, document_mode=document_mode)
         preferences = replace(preferences, include_playlist=include_playlist)
@@ -270,9 +272,6 @@ _AUDIO_PLATFORMS = frozenset({"spotify", "soundcloud", "hitmoz", "zaycev"})
 _SOCIAL_MEDIA_PLATFORMS = frozenset(
     {"tiktok", "instagram", "x", "threads", "pinterest"}
 )
-_VIDEO_QUALITIES = frozenset({"best", "1080", "720", "480"})
-
-
 class CreateSelection:
     def __init__(
         self,
@@ -328,13 +327,7 @@ class CreateSelection:
                 urls=validated,
                 platforms=platforms,
                 mode=mode,
-                quality="best"
-                if any(
-                    platform.value
-                    in _SOCIAL_MEDIA_PLATFORMS | _AUDIO_PLATFORMS
-                    for platform in platforms
-                )
-                else preferences.quality,
+                quality="best",
                 delivery=DeliveryMode.FILE
                 if preferences.document_mode
                 else DeliveryMode.MEDIA,
@@ -390,8 +383,10 @@ class UpdateSelection:
         if action == "mode" and value in {item.value for item in SelectionMode}:
             requested = SelectionMode(value)
             changes = {"mode": _allowed_mode(requested, selection.platforms)}
-        elif action == "quality" and value in _VIDEO_QUALITIES:
-            changes = {"quality": value}
+        elif action == "quality":
+            # Gracefully retire callbacks from selection cards created before
+            # automatic format selection replaced manual quality controls.
+            changes = {"quality": "best"}
         elif action == "delivery" and value in {item.value for item in DeliveryMode}:
             changes = {"delivery": DeliveryMode(value)}
         elif action == "scope" and value in {
@@ -453,7 +448,7 @@ class ConfirmSelection:
                     source_message_id=selection.source_message_id,
                     business_connection_id=selection.business_connection_id,
                     audio_only=audio_only,
-                    quality=selection.quality,
+                    quality="best",
                     document_mode=document_mode,
                     include_playlist=include_playlist,
                     status_message_id=selection.status_message_id,
@@ -468,7 +463,7 @@ class ConfirmSelection:
                         source_message_id=selection.source_message_id,
                         business_connection_id=selection.business_connection_id,
                         audio_only=audio_only,
-                        quality=selection.quality,
+                        quality="best",
                         document_mode=document_mode,
                         include_playlist=include_playlist,
                         status_message_id=selection.status_message_id,
@@ -528,7 +523,7 @@ class RetryInFormat:
                 source_message_id=source.source_message_id,
                 business_connection_id=source.business_connection_id,
                 audio_only=audio_only,
-                quality=source.preferences.quality,
+                quality="best",
                 document_mode=document_mode,
                 include_playlist=source.preferences.include_playlist,
             )
@@ -583,7 +578,11 @@ class ProcessDownload:
         original_job = job
         try:
             job = await self._move(
-                job, {JobStage.QUEUED, JobStage.RETRYING}, JobStage.RESOLVING, 0
+                job,
+                {JobStage.QUEUED, JobStage.RETRYING},
+                JobStage.RESOLVING,
+                0,
+                indeterminate=True,
             )
             if job is None:
                 return await self._jobs.get(job_id)
@@ -592,7 +591,11 @@ class ProcessDownload:
             if cached:
                 await self._artifacts.persist(job.id, cached)
                 job = await self._move(
-                    job, {JobStage.RESOLVING}, JobStage.PROCESSING, 100
+                    job,
+                    {JobStage.RESOLVING},
+                    JobStage.PROCESSING,
+                    0,
+                    indeterminate=True,
                 )
                 if job is None:
                     return await self._jobs.get(job_id)
@@ -603,15 +606,16 @@ class ProcessDownload:
                     )
                 return job
             cancellation = RepositoryCancellation(self._jobs, job.id)
-            post = await adapter.resolve(
-                job.source_url,
-                job.preferences,
-                audio_only=job.audio_only,
-                cancellation=cancellation,
-            )
+            post = await self._resolve(adapter, job, cancellation)
             if await cancellation.requested():
                 return await self._cancel(job)
-            job = await self._move(job, {JobStage.RESOLVING}, JobStage.DOWNLOADING, 0)
+            job = await self._move(
+                job,
+                {JobStage.RESOLVING},
+                JobStage.DOWNLOADING,
+                0,
+                indeterminate=True,
+            )
             if job is None:
                 return await self._jobs.get(job_id)
 
@@ -622,7 +626,11 @@ class ProcessDownload:
             if await cancellation.requested():
                 return await self._cancel(job)
             job = await self._move(
-                job, {JobStage.DOWNLOADING}, JobStage.PROCESSING, 100
+                job,
+                {JobStage.DOWNLOADING},
+                JobStage.PROCESSING,
+                0,
+                indeterminate=True,
             )
             if job is None:
                 return await self._jobs.get(job_id)
@@ -646,16 +654,63 @@ class ProcessDownload:
             )
 
     async def _move(
-        self, job: Job, expected: set[JobStage], stage: JobStage, percent: int
+        self,
+        job: Job,
+        expected: set[JobStage],
+        stage: JobStage,
+        percent: int,
+        *,
+        indeterminate: bool = False,
     ) -> Job | None:
         moved = await self._jobs.transition(job.id, expected, stage)
         if moved:
             await self._progress.publish(
                 Progress(
-                    job_id=job.id, stage=stage, percent=percent, attempt=moved.attempt
+                    job_id=job.id,
+                    stage=stage,
+                    percent=percent,
+                    attempt=moved.attempt,
+                    indeterminate=indeterminate,
                 )
             )
         return moved
+
+    async def _resolve(
+        self,
+        adapter: PlatformAdapter,
+        job: Job,
+        cancellation: RepositoryCancellation,
+    ) -> MediaPost:
+        task = asyncio.create_task(
+            adapter.resolve(
+                job.source_url,
+                job.preferences,
+                audio_only=job.audio_only,
+                cancellation=cancellation,
+            )
+        )
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {task}, timeout=_RESOLVE_PROGRESS_INTERVAL_SECONDS
+                )
+                if task in done:
+                    return task.result()
+                await self._progress.publish(
+                    Progress(
+                        job_id=job.id,
+                        stage=JobStage.RESOLVING,
+                        attempt=job.attempt,
+                        elapsed_seconds=max(1, int(loop.time() - started_at)),
+                        indeterminate=True,
+                    )
+                )
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     async def _cancel(self, job: Job) -> Job | None:
         cancelling = await self._jobs.transition(

@@ -637,7 +637,6 @@ async def test_navigation_selection_status_and_result_callbacks(monkeypatch) -> 
     for data in (
         "settings:page:download",
         "settings:youtube:ask",
-        "settings:quality:720",
         "settings:set:document_mode:true",
         "settings:toggle:compact_progress",
         "settings:home",
@@ -646,9 +645,6 @@ async def test_navigation_selection_status_and_result_callbacks(monkeypatch) -> 
         await handler(router, "callback_query", "update_settings")(query)
     await handler(router, "message", "show_status")(message)
 
-    query.data = "sel:quality:720:selection-token"
-    await handler(router, "callback_query", "selection_action")(query)
-    assert gateway.updated[-1].quality == "720"
     query.data = "sel:confirm:selection-token"
     await handler(router, "callback_query", "selection_action")(query)
     assert gateway.status[-1][0].id == "confirmed"

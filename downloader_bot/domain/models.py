@@ -165,8 +165,10 @@ class MediaAsset:
     request_headers: tuple[tuple[str, str], ...] = ()
     extractor_url: str | None = None
     format_selector: str | None = None
+    format_sort: str | None = None
     cookies_file: str | None = None
     thumbnail_url: str | None = None
+    requires_extractor_download: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,8 +211,9 @@ class UserPreferences:
         return ":".join(
             (
                 "audio" if audio_only else "media",
-                self.quality,
+                "automatic",
                 "m4a" if audio_only else "mp4",
+                "document" if self.document_mode else "native",
                 "playlist" if self.include_playlist else "single",
             )
         )
@@ -230,8 +233,11 @@ class Progress:
     error_code: ErrorCode | None = None
     downloaded_bytes: int | None = None
     total_bytes: int | None = None
+    total_bytes_is_estimate: bool = False
     speed_bytes_per_second: int | None = None
     eta_seconds: int | None = None
+    elapsed_seconds: int | None = None
+    indeterminate: bool = False
     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:

@@ -129,7 +129,7 @@ async def _stop_process_group(process: asyncio.subprocess.Process) -> None:
 class YtDlpPlatformAdapter:
     platform: Platform
     cookies_file: str | None = None
-    format_selector: str = "best[ext=mp4]/best"
+    format_selector: str = "bestvideo*+bestaudio/best"
     youtube_pot_provider_url: str | None = None
     resolve_timeout_seconds: int = 120
 
@@ -146,6 +146,10 @@ class YtDlpPlatformAdapter:
             url,
             source_url=url,
             format_selector=selector,
+            format_sort=_format_sort(
+                audio_only=audio_only,
+                document_mode=preferences.document_mode,
+            ),
             force_audio=audio_only,
             include_playlist=preferences.include_playlist,
             cancellation=cancellation,
@@ -157,6 +161,7 @@ class YtDlpPlatformAdapter:
         *,
         source_url: str,
         format_selector: str | None = None,
+        format_sort: str | None = None,
         force_audio: bool = False,
         include_playlist: bool = False,
         cancellation: Cancellation | None = None,
@@ -166,12 +171,17 @@ class YtDlpPlatformAdapter:
                 sys.executable,
                 "-m",
                 "yt_dlp",
+                "--ignore-config",
                 "--dump-single-json",
                 "--no-warnings",
                 "--format",
                 format_selector or self.format_selector,
+                "--format-sort",
+                format_sort or _format_sort(audio_only=force_audio),
                 "--yes-playlist" if include_playlist else "--no-playlist",
             ]
+            if not force_audio:
+                command.extend(("--merge-output-format", "mp4/mkv"))
             if cookie_file:
                 command.extend(("--cookies", cookie_file))
             if self.platform in {Platform.YOUTUBE, Platform.SPOTIFY}:
@@ -228,6 +238,7 @@ class YtDlpPlatformAdapter:
                 or entry.get("original_url")
                 or target,
                 format_selector=format_selector or self.format_selector,
+                format_sort=format_sort or _format_sort(audio_only=force_audio),
                 cookies_file=self.cookies_file,
                 force_audio=force_audio,
             )
@@ -252,6 +263,7 @@ class YtDlpPlatformAdapter:
         *,
         extractor_url: str | None = None,
         format_selector: str | None = None,
+        format_sort: str | None = None,
         cookies_file: str | None = None,
         force_audio: bool = False,
     ) -> MediaAsset:
@@ -302,10 +314,12 @@ class YtDlpPlatformAdapter:
             request_headers=_request_headers(entry, selected),
             extractor_url=extractor_url,
             format_selector=format_selector,
+            format_sort=format_sort,
             cookies_file=cookies_file,
             thumbnail_url=entry.get("thumbnail")
             if isinstance(entry.get("thumbnail"), str)
             else None,
+            requires_extractor_download=len(requested) > 1,
         )
 
 
@@ -895,12 +909,33 @@ def _hitmoz_http_error(exc: httpx.HTTPStatusError) -> DownloadError:
 
 
 def _format_selector(preferences: UserPreferences, *, audio_only: bool) -> str:
+    if preferences.document_mode:
+        return "bestaudio/best" if audio_only else "bestvideo*+bestaudio/best"
     if audio_only:
-        return "bestaudio/best"
-    if preferences.quality == "best":
-        return "best[ext=mp4]/best"
-    height = int(preferences.quality) if preferences.quality.isdigit() else 720
-    return f"best[height<={height}][ext=mp4]/best[height<={height}]/best"
+        return (
+            "bestaudio[acodec^=mp4a]/bestaudio[acodec^=aac]/"
+            "bestaudio[acodec=mp3]/bestaudio/best"
+        )
+    return (
+        "bestvideo+bestaudio[acodec^=mp4a]/"
+        "bestvideo+bestaudio[acodec^=aac]/"
+        "bestvideo+bestaudio[acodec=mp3]/bestvideo+bestaudio/best"
+    )
+
+
+def _format_sort(
+    *, audio_only: bool, quality: str = "best", document_mode: bool = False
+) -> str:
+    resolution = f"res:{quality}" if quality.isdigit() else "res"
+    if document_mode:
+        return (
+            "lang,quality,abr,acodec"
+            if audio_only
+            else f"lang,quality,{resolution},fps,hdr:12,vcodec,acodec"
+        )
+    if audio_only:
+        return "acodec:aac,lang,quality,abr"
+    return f"vcodec:h264,lang,quality,{resolution},fps,hdr:12,acodec:aac"
 
 
 def _hitmoz_download_links(page: str, base_url: str) -> tuple[str, ...]:

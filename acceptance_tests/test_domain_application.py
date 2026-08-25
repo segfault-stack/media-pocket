@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -337,8 +338,10 @@ def test_progress_throttle_contract() -> None:
     throttle = ProgressThrottle(clock)
     assert throttle.accept(Progress("job", JobStage.DOWNLOADING, 10))
     assert not throttle.accept(Progress("job", JobStage.DOWNLOADING, 11))
+    assert not throttle.accept(Progress("job", JobStage.DOWNLOADING, 12))
+    clock.tick = 0.8
     assert throttle.accept(Progress("job", JobStage.DOWNLOADING, 12))
-    clock.tick = 2.1
+    clock.tick = 2.9
     assert throttle.accept(Progress("job", JobStage.DOWNLOADING, 13))
 
 
@@ -372,7 +375,7 @@ async def test_batch_creates_parent_and_children_with_snapshot() -> None:
     assert parent.is_parent and parent.kind is JobKind.BATCH
     assert parent.children_total == 2
     assert all(child.parent_id == parent.id and child.audio_only for child in children)
-    assert all(child.preferences.quality == "720" for child in children)
+    assert all(child.preferences.quality == "best" for child in children)
 
 
 @pytest.mark.asyncio
@@ -467,7 +470,7 @@ async def test_selection_is_persisted_updated_and_confirmed_once() -> None:
         source_message_id=9,
     )
     assert selection.mode is SelectionMode.VIDEO
-    assert selection.quality == "1080"
+    assert selection.quality == "best"
     assert selection.delivery is DeliveryMode.FILE
     assert selection.expires_at > selection.created_at
 
@@ -478,7 +481,7 @@ async def test_selection_is_persisted_updated_and_confirmed_once() -> None:
     confirm = ConfirmSelection(selections, submit, batch, Clock(), analytics)
     _, job, claimed = await confirm.execute(selection.token, 7)
     assert claimed and job and job.audio_only
-    assert job.preferences.quality == "1080"
+    assert job.preferences.quality == "best"
     assert job.preferences.document_mode
     _, duplicate, claimed_again = await confirm.execute(selection.token, 7)
     assert duplicate is None and not claimed_again
@@ -671,6 +674,40 @@ async def test_pipeline_and_cache_reach_ready() -> None:
     assert result and result.stage is JobStage.READY
     assert artifacts.value == (ARTIFACT,)
     assert "job_ready" in analytics.events
+
+
+@pytest.mark.asyncio
+async def test_slow_resolver_reports_real_elapsed_activity(monkeypatch) -> None:
+    class SlowAdapter(Adapter):
+        async def resolve(self, *args, **kwargs):
+            await asyncio.sleep(0.03)
+            return await super().resolve(*args, **kwargs)
+
+    class SlowRegistry:
+        def detect(self, _url):
+            return SlowAdapter()
+
+    monkeypatch.setattr(
+        "downloader_bot.application.use_cases._RESOLVE_PROGRESS_INTERVAL_SECONDS",
+        0.01,
+    )
+    jobs, artifacts, progress, analytics = Jobs(), Artifacts(), Bus(), Analytics()
+    job = Job("slow", 1, 1, "https://example.com", "slow-key")
+    jobs.items[job.id] = job
+    result = await ProcessDownload(
+        jobs,
+        SlowRegistry(),
+        Engine(),
+        artifacts,
+        progress,
+        analytics,
+        Clock(),
+        Cache(),
+    ).execute(job.id)
+    resolving = [event for event in progress.events if event.stage is JobStage.RESOLVING]
+    assert result and result.stage is JobStage.READY
+    assert any(event.indeterminate for event in resolving)
+    assert any(event.elapsed_seconds is not None for event in resolving)
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ import pytest
 from downloader_bot.__main__ import download_hitmoz
 from downloader_bot.domain import (
     DeliveryMode,
+    ErrorCode,
     Job,
     JobStage,
     MediaAsset,
@@ -21,6 +22,7 @@ from downloader_bot.domain import (
     Progress,
     SelectionMode,
     SelectionRequest,
+    UserPreferences,
 )
 from downloader_bot.domain.errors import DownloadError
 from downloader_bot.infrastructure.artifacts import FileArtifactStore
@@ -41,9 +43,12 @@ from downloader_bot.infrastructure.database import (
     _selection_values,
 )
 from downloader_bot.infrastructure.download import (
+    _YTDLP_PROGRESS_PREFIX,
     HttpDownloadEngine,
+    _audio_strategy,
     _download_headers,
     _is_telegram_compatible_video,
+    _next_chunk,
     _suffix,
     _total_size,
     _transcode_audio,
@@ -62,6 +67,24 @@ class Cancellation:
 
     async def requested(self):
         return self.value
+
+
+@pytest.mark.asyncio
+async def test_slow_http_read_can_be_cancelled_between_chunks(monkeypatch) -> None:
+    class SlowChunks:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._CANCELLATION_POLL_SECONDS",
+        0.01,
+    )
+    with pytest.raises(DownloadError) as raised:
+        await _next_chunk(SlowChunks(), Cancellation(True))
+    assert raised.value.code is ErrorCode.CANCELLED
 
 
 @pytest.mark.asyncio
@@ -108,7 +131,9 @@ async def test_http_engine_downloads_and_hashes_without_network(tmp_path) -> Non
             Cancellation(),
         )
     assert result[0].size == 5 and Path(result[0].path).read_bytes() == b"media"
-    assert events[-1].percent == 99
+    assert any(event.stage is JobStage.DOWNLOADING and event.percent == 99 for event in events)
+    assert events[-1].stage is JobStage.PROCESSING
+    assert events[-1].detail == "preparing_document"
 
 
 @pytest.mark.asyncio
@@ -116,6 +141,8 @@ async def test_force_audio_changes_video_artifact_kind_and_keeps_metadata(
     monkeypatch, tmp_path
 ) -> None:
     async def transcode(source, _cancellation, **metadata):
+        assert callable(metadata.pop("report"))
+        assert metadata.pop("strategy") == "transcode"
         assert metadata == {"title": "Track", "author": "Artist"}
         output = source.with_suffix(".m4a")
         source.replace(output)
@@ -164,6 +191,80 @@ async def test_force_audio_changes_video_artifact_kind_and_keeps_metadata(
 
 
 @pytest.mark.asyncio
+async def test_file_delivery_preserves_original_without_transcoding(
+    monkeypatch, tmp_path
+) -> None:
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("document delivery must preserve the downloaded file")
+
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._transcode_video", unexpected
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, content=b"original", headers={"content-length": "8"}
+            )
+        )
+    ) as client:
+        result = await HttpDownloadEngine(client, tmp_path).download(
+            MediaPost(
+                "https://example.com/post",
+                Platform.GENERIC,
+                (MediaAsset("https://cdn.example/video.webm", MediaKind.VIDEO),),
+            ),
+            Job(
+                "document-job",
+                1,
+                1,
+                "https://example.com/post",
+                "key",
+                preferences=UserPreferences(document_mode=True),
+            ),
+            lambda _progress: asyncio.sleep(0),
+            Cancellation(),
+        )
+    assert Path(result[0].path).suffix == ".webm"
+    assert Path(result[0].path).read_bytes() == b"original"
+
+
+@pytest.mark.asyncio
+async def test_prepared_media_size_is_checked_after_conversion(monkeypatch, tmp_path) -> None:
+    async def strategy(_target):
+        return "transcode"
+
+    async def expand(target, _cancellation, **_kwargs):
+        target.write_bytes(b"x" * 20)
+        return target
+
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._video_strategy", strategy
+    )
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._transcode_video", expand
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, content=b"small", headers={"content-length": "5"}
+            )
+        )
+    ) as client:
+        with pytest.raises(DownloadError) as raised:
+            await HttpDownloadEngine(client, tmp_path, max_file_size=10).download(
+                MediaPost(
+                    "https://example.com/post",
+                    Platform.GENERIC,
+                    (MediaAsset("https://cdn.example/video.mp4", MediaKind.VIDEO),),
+                ),
+                Job("expanded", 1, 1, "https://example.com/post", "key"),
+                lambda _progress: asyncio.sleep(0),
+                Cancellation(),
+            )
+    assert raised.value.code is ErrorCode.TOO_LARGE
+
+
+@pytest.mark.asyncio
 async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
     monkeypatch, tmp_path
 ) -> None:
@@ -174,9 +275,27 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
         async def read(self):
             return b""
 
+    class Stdout:
+        def __init__(self) -> None:
+            payload = {
+                "status": "downloading",
+                "downloaded_bytes": 512,
+                "total_bytes_estimate": 1024,
+                "speed": 256,
+                "eta": 2,
+                "elapsed": 2.5,
+            }
+            self.lines = [
+                f"{_YTDLP_PROGRESS_PREFIX}{json.dumps(payload)}\n".encode()
+            ]
+
+        async def readline(self):
+            return self.lines.pop(0) if self.lines else b""
+
     class Process:
         returncode = None
         stderr = Stderr()
+        stdout = Stdout()
 
         def __init__(self, template: Path) -> None:
             self.template = template
@@ -237,10 +356,24 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
     assert str(cookie_snapshot) not in command
     assert copied_cookie_file is not None and not copied_cookie_file.exists()
     assert events[-1].item_count == 2
+    assert events[-1].percent == 50
+    assert events[-1].downloaded_bytes == 512
+    assert events[-1].total_bytes == 1024
+    assert events[-1].total_bytes_is_estimate
+    assert events[-1].speed_bytes_per_second == 256
+    assert events[-1].eta_seconds == 2
+    assert "--progress-template" in command
+    assert "--ignore-config" in command
 
 
 @pytest.mark.asyncio
-async def test_http_403_uses_the_ytdlp_fallback(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("platform", "requires_extractor"),
+    [(Platform.YOUTUBE, False), (Platform.INSTAGRAM, True)],
+)
+async def test_extractor_download_preserves_selected_formats(
+    monkeypatch, tmp_path, platform, requires_extractor
+) -> None:
     async def fallback(
         _self, _asset, _job, _item, _count, directory, _progress, _cancellation
     ):
@@ -257,13 +390,17 @@ async def test_http_403_uses_the_ytdlp_fallback(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "downloader_bot.infrastructure.download._transcode_audio", transcode
     )
+
+    def unexpected_http(_request):
+        raise AssertionError("merged media must be downloaded by yt-dlp")
+
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _request: httpx.Response(403))
+        transport=httpx.MockTransport(unexpected_http)
     ) as client:
         result = await HttpDownloadEngine(client, tmp_path).download(
             MediaPost(
                 "https://youtube.com/watch?v=x",
-                Platform.YOUTUBE,
+                platform,
                 (
                     MediaAsset(
                         "https://googlevideo.example/audio",
@@ -271,6 +408,7 @@ async def test_http_403_uses_the_ytdlp_fallback(monkeypatch, tmp_path) -> None:
                         title="Track",
                         author="Artist",
                         extractor_url="https://youtube.com/watch?v=x",
+                        requires_extractor_download=requires_extractor,
                     ),
                 ),
             ),
@@ -284,6 +422,10 @@ async def test_http_403_uses_the_ytdlp_fallback(monkeypatch, tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_ytdlp_fallback_maps_downloader_failure(monkeypatch, tmp_path) -> None:
+    class Stdout:
+        async def readline(self):
+            return b""
+
     class Stderr:
         async def read(self):
             return b"youtube download failed"
@@ -291,6 +433,7 @@ async def test_ytdlp_fallback_maps_downloader_failure(monkeypatch, tmp_path) -> 
     class Process:
         returncode = 1
         stderr = Stderr()
+        stdout = Stdout()
 
     async def create(*_args, **_kwargs):
         return Process()
@@ -373,11 +516,14 @@ async def test_http_engine_uses_ffmpeg_for_hls_playlists(monkeypatch, tmp_path) 
         returncode = 0
         stderr = None
 
+        async def communicate(self):
+            return b"{}", b""
+
     async def create(*args, **_kwargs):
         Path(args[-1]).write_bytes(b"video")
         return Process()
 
-    async def keep_video(target, _cancellation):
+    async def keep_video(target, _cancellation, **_kwargs):
         return target
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", create)
@@ -401,7 +547,7 @@ async def test_http_engine_uses_ffmpeg_for_hls_playlists(monkeypatch, tmp_path) 
         result = await HttpDownloadEngine(client, tmp_path).download(
             post,
             Job("hls", 1, 1, post.source_url, "key"),
-            lambda _progress: None,
+            lambda _progress: asyncio.sleep(0),
             Cancellation(),
         )
     assert Path(result[0].path).suffix == ".mp4"
@@ -450,7 +596,7 @@ def test_download_helpers() -> None:
 async def test_audio_transcode_subprocess_success_failure_and_cancel(
     monkeypatch, tmp_path
 ) -> None:
-    source = tmp_path / "source.m4a"
+    source = tmp_path / "source.webm"
     source.write_bytes(b"audio")
 
     class Stderr:
@@ -476,7 +622,7 @@ async def test_audio_transcode_subprocess_success_failure_and_cancel(
         return Process(Path(args[-1]))
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", success)
-    output = await _transcode_audio(source, Cancellation())
+    output = await _transcode_audio(source, Cancellation(), strategy="transcode")
     assert output.suffix == ".m4a" and output.read_bytes() == b"converted"
 
     source.write_bytes(b"audio")
@@ -486,14 +632,50 @@ async def test_audio_transcode_subprocess_success_failure_and_cancel(
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", failure)
     with pytest.raises(DownloadError, match="conversion failed"):
-        await _transcode_audio(source, Cancellation())
+        await _transcode_audio(source, Cancellation(), strategy="transcode")
 
     async def pending(*args, **_kwargs):
         return Process(Path(args[-1]))
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", pending)
     with pytest.raises(DownloadError):
-        await _transcode_audio(source, Cancellation(True))
+        await _transcode_audio(
+            source, Cancellation(True), strategy="transcode"
+        )
+
+
+@pytest.mark.asyncio
+async def test_audio_strategy_avoids_unnecessary_encoding(monkeypatch, tmp_path) -> None:
+    codec = "aac"
+    format_name = "mov,mp4,m4a,3gp,3g2,mj2"
+
+    class ProbeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            payload = {
+                "streams": [{"codec_name": codec}],
+                "format": {"format_name": format_name},
+            }
+            return json.dumps(payload).encode(), b""
+
+    async def probe_only(*args, **_kwargs):
+        assert args[0] == "ffprobe"
+        return ProbeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", probe_only)
+    source = tmp_path / "source.m4a"
+    source.write_bytes(b"audio")
+    assert await _transcode_audio(source, Cancellation()) == source
+    codec = "mp3"
+    format_name = "mp3"
+    source = tmp_path / "source.mp3"
+    source.write_bytes(b"audio")
+    assert await _audio_strategy(source) == "passthrough"
+    codec = "aac"
+    assert await _audio_strategy(source) == "remux"
+    codec = "opus"
+    assert await _audio_strategy(source) == "transcode"
 
 
 @pytest.mark.asyncio
@@ -572,6 +754,12 @@ async def test_video_transcode_stream_copies_compatible_mp4(monkeypatch, tmp_pat
                                 "pix_fmt": "yuv420p",
                             },
                             {"codec_type": "audio", "codec_name": "aac"},
+                            {
+                                "codec_type": "video",
+                                "codec_name": "mjpeg",
+                                "pix_fmt": "yuvj420p",
+                            },
+                            {"codec_type": "audio", "codec_name": "opus"},
                         ],
                     }
                 ).encode(),
@@ -602,6 +790,83 @@ async def test_video_transcode_stream_copies_compatible_mp4(monkeypatch, tmp_pat
     assert ffmpeg_command[ffmpeg_command.index("-codec") + 1] == "copy"
     assert "libx264" not in ffmpeg_command
     assert "+faststart" in ffmpeg_command
+
+
+@pytest.mark.asyncio
+async def test_streaming_ready_mp4_skips_ffmpeg(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"\x00\x00\x00\x08ftyp\x00\x00\x00\x08moov")
+
+    class ProbeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            payload = {
+                "format": {"format_name": "mov,mp4"},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "pix_fmt": "yuv420p",
+                    },
+                    {"codec_type": "audio", "codec_name": "aac"},
+                ],
+            }
+            return json.dumps(payload).encode(), b""
+
+    async def probe_only(*args, **_kwargs):
+        assert args[0] == "ffprobe"
+        return ProbeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", probe_only)
+    assert await _transcode_video(source, Cancellation()) == source
+
+
+@pytest.mark.asyncio
+async def test_compatible_video_only_transcodes_audio(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source.webm"
+    source.write_bytes(b"video")
+    commands: list[tuple[object, ...]] = []
+
+    class ProbeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            payload = {
+                "format": {"format_name": "matroska,webm"},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "pix_fmt": "yuv420p",
+                    },
+                    {"codec_type": "audio", "codec_name": "opus"},
+                ],
+            }
+            return json.dumps(payload).encode(), b""
+
+    class FfmpegProcess:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            Path(commands[-1][-1]).write_bytes(b"prepared")
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = -15
+
+    async def create(*args, **_kwargs):
+        commands.append(args)
+        return ProbeProcess() if args[0] == "ffprobe" else FfmpegProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    await _transcode_video(source, Cancellation())
+    command = commands[-1]
+    assert command[command.index("-codec:v") + 1] == "copy"
+    assert command[command.index("-codec:a") + 1] == "aac"
+    assert "libx264" not in command
 
 
 @pytest.mark.asyncio
@@ -785,11 +1050,23 @@ async def test_redis_stream_queue_and_progress_contracts() -> None:
 
     bus = RedisProgressBus(redis)
     await bus.initialize()
-    progress = Progress("job", JobStage.DOWNLOADING, 42)
+    progress = Progress(
+        "job",
+        JobStage.DOWNLOADING,
+        42,
+        downloaded_bytes=420,
+        total_bytes=1000,
+        total_bytes_is_estimate=True,
+        elapsed_seconds=3,
+        indeterminate=True,
+    )
     await bus.publish(progress)
     payload = redis.added[-1][1]["payload"]
     redis.reads = [(b"download-progress", [(b"4-0", {b"payload": payload.encode()})])]
     values = [item async for item in bus.consume("bot")]
     assert values[0].percent == 42
+    assert values[0].total_bytes_is_estimate
+    assert values[0].elapsed_seconds == 3
+    assert values[0].indeterminate
     assert redis.acked[-1][-1] == b"4-0"
     assert _text(b"value") == "value" and _text(1) == "1"
