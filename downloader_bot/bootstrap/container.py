@@ -100,7 +100,11 @@ class Container:
 
 async def build_container(settings: Settings) -> Container:
     engine, sessions = create_engine(settings.database_url)
-    redis = Redis.from_url(settings.redis_url)
+    redis = Redis.from_url(
+        settings.redis_url,
+        socket_timeout=None,
+        socket_connect_timeout=5,
+    )
     http = httpx.AsyncClient(
         timeout=httpx.Timeout(60, read=600), limits=httpx.Limits(max_connections=100)
     )
