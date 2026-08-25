@@ -1,8 +1,6 @@
 <div align="center">
 
-# 📥 Media Pocket
-
-### Send a link. Get clean media back.
+<img src="docs/media-pocket-hero.png" alt="Media Pocket — Send a link. Get clean media back." width="100%">
 
 **An invite-only, self-hosted Telegram downloader for video, audio, social posts, albums, playlists, and batches.**
 
@@ -11,51 +9,42 @@
 ![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 
-[Features](#overview) ·
-[Platforms](#platforms) ·
+[Features](#what-it-does) ·
+[Sources](#supported-sources) ·
 [Deployment](#deployment) ·
 [Usage](#using-the-bot) ·
-[Providers](#provider-setup) ·
-[Security](#security) ·
-[Development](#development)
+[Security](#security)
 
 </div>
 
-## Overview
+## ✨ What it does
 
 Media Pocket turns Telegram into a private media inbox. Send one link or a batch; the bot resolves the provider, chooses the natural format, shows live progress, and returns the finished media.
 
-| | |
-| :---: | :---: |
-| **🎯 Natural by default**<br>Video stays video, audio-first sources stay audio, and YouTube follows each user's saved preference. | **✨ Clean delivery**<br>Media carries no caption or source URL, and non-audio filenames are randomized. Status, source links, and actions remain separate. |
-| **📚 Built for collections**<br>Single links, batches, albums, and playlists share the same durable PostgreSQL and Redis-backed workflow. | **🔐 Private by design**<br>Invitation checks cover private chats, groups, Business messages, callbacks, and inline mode. |
+- **Natural by default.** Video stays video, audio-first sources stay audio, and YouTube follows each user's saved preference.
+- **Clean in Telegram.** Media carries no caption or source URL, non-audio filenames are randomized, and actions arrive separately.
+- **Built for collections.** Single links, batches, albums, and playlists share the same durable worker pipeline.
+- **Private at every entry point.** Invitations protect chats, groups, Business messages, callbacks, and inline mode.
 
 The bot and workers run as separate processes. PostgreSQL stores canonical state, Redis Streams carries jobs and progress, and shared artifact storage connects downloading to Telegram delivery.
 
 > [!WARNING]
 > Media Pocket does not bypass provider access controls. Private, deleted, region-restricted, or authentication-gated content may require valid cookies or may remain unavailable. Operators are responsible for complying with provider rules and local law.
 
-## Platforms
+## 🌍 Supported sources
 
-| Source | Natural mode | Available handling |
+| Category | Sources | Available handling |
 | --- | --- | --- |
-| YouTube | user preference | video, audio, playlists, quality selection |
-| TikTok | media | audio extraction and file delivery |
-| Instagram | media | posts, albums, audio extraction, file delivery |
-| X / Twitter | media | posts, audio extraction, file delivery |
-| Threads | media | posts, audio extraction, file delivery |
-| Pinterest | media | posts, audio extraction, file delivery |
-| Spotify | audio | tracks, albums, playlists, native audio or fallback |
-| SoundCloud | audio | tracks and file delivery |
-| Zaycev.net | audio | tracks and file delivery |
-| HitMoz | audio | tracks, albums, and direct CLI downloads |
-| Generic HTTP(S) | detected | yt-dlp resolution where supported |
+| Video | YouTube | video, audio, playlists, quality selection, per-user default |
+| Social | TikTok, Instagram, X / Twitter, Threads, Pinterest | media-first delivery, audio extraction, files, provider collections |
+| Audio | Spotify, SoundCloud, Zaycev.net, HitMoz | tracks, albums and playlists where supported, native Spotify audio or fallback |
+| Generic | HTTP(S) links | format detection and yt-dlp resolution where supported |
 
 Video sources can offer **Video** or **Audio**, **Best / 1080p / 720p / 480p**, and **Media** or **File** delivery where those choices apply. Social posts do not show a fake resolution selector. Audio-first providers expose only relevant controls.
 
 Video is normalized to streaming-compatible MP4 with H.264/AAC. Audio is normalized to M4A with AAC-LC and includes title, performer, duration, and thumbnail metadata when the provider supplies it.
 
-## How downloads behave
+## 🔄 Download flow
 
 1. **Resolve** — identify the provider and apply its natural mode or the user's YouTube preference.
 2. **Queue** — persist a job snapshot and atomically enqueue it for a worker.
@@ -68,7 +57,7 @@ For batches, each link keeps its provider-native mode. If a batch contains YouTu
 
 Failures remain visible as a compact card with a human-readable reason, a next step, retry, format change, and help actions. Tracebacks, provider internals, and internal error codes are never shown to users.
 
-## Deployment
+## 🚀 Deployment
 
 ### Requirements
 
@@ -131,7 +120,7 @@ docker compose ps
 
 The image contains the locked Python environment and media toolchain. Compose mounts the checkout at `/app` read-only and provides separate writable volumes for downloads, logs, cookies, and Spotify state. Restart the bot and workers after source changes; rebuild only when dependencies or the toolchain change.
 
-## Using the bot
+## 🤖 Using the bot
 
 Open the bot, run `/admin`, create an invitation code, and redeem it from each account that should have access. Then send a supported link or several links in one message.
 
@@ -149,7 +138,7 @@ Open the bot, run `/admin`, create an invitation code, and redeem it from each a
 
 Single results can expose contextual actions such as **Get audio**, **Get video**, **Send as file**, **Source**, and **Share**. Albums are delivered as media groups followed by one compact action card.
 
-## Invite-only access
+## 🔐 Invite-only access
 
 At least one administrator must be created from the command line before the bot starts. Administrators can generate:
 
@@ -161,7 +150,7 @@ Users send the bare code or `/redeem CODE`. A successful redemption grants acces
 
 Inline mode is not a side door: unauthorized users only receive a prompt to open the private chat and enter a code. Callback ownership is checked as well, so another user cannot confirm, cancel, or retry someone else's request.
 
-## Provider setup
+## 🔌 Provider setup
 
 <details>
 <summary><strong>YouTube compatibility stack</strong></summary>
@@ -216,7 +205,7 @@ docker compose --profile cookie-broker up -d cookie-sync
 
 </details>
 
-## Security
+## 🛡️ Security
 
 Media Pocket handles bot tokens, provider sessions, browser cookies, and user-submitted URLs.
 
@@ -282,7 +271,7 @@ See [architecture details](docs/architecture-v2.md), the [code map](docs/code-ma
 
 </details>
 
-## Development
+## 🧰 Development
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the locked Python 3.14 environment:
 
@@ -314,7 +303,7 @@ scripts/security-check
 
 `uv.lock` is shared by local development and the runtime image. The acceptance suite mocks Telegram, providers, PostgreSQL repositories, and Redis Streams. Production-code coverage must remain at least 80%.
 
-## Current boundaries
+## 🚧 Current boundaries
 
 - Self-hosted deployment only; there is no hosted service.
 - There is no web administration panel.
