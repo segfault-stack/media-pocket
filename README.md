@@ -6,68 +6,99 @@
 
 **An invite-only, self-hosted Telegram downloader for video, audio, social posts, albums, playlists, and batches.**
 
+[![CI](https://github.com/segfault-stack/media-pocket/actions/workflows/ci.yml/badge.svg)](https://github.com/segfault-stack/media-pocket/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/segfault-stack/media-pocket)](LICENCE)
-![Python](https://img.shields.io/badge/Python-3.14%2B-3776AB?logo=python&logoColor=white)
-![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 
-[Quick start](#-quick-start) ·
-[How it works](#-what-happens-after-a-link) ·
-[Platforms](#-platforms-and-formats) ·
-[Access](#-invite-only-by-design) ·
-[Spotify](#-spotify-native-audio) ·
-[Security](#-security)
+[Features](#overview) ·
+[Platforms](#platforms) ·
+[Deployment](#deployment) ·
+[Usage](#using-the-bot) ·
+[Providers](#provider-setup) ·
+[Security](#security) ·
+[Development](#development)
 
 </div>
 
----
+## Overview
 
-Media Pocket turns Telegram into a private media inbox. Send one link or a batch and let workers handle extraction, conversion, and delivery. Provider-native defaults avoid a menu on every request, while YouTube can be configured per user for video, audio, or an explicit format prompt.
+Media Pocket turns Telegram into a private media inbox. Send one link or a batch; the bot resolves the provider, chooses the natural format, shows live progress, and returns the finished media.
 
-> **link → provider-native mode → live progress → clean media**
+| | |
+| --- | --- |
+| **🎯 Natural by default**<br>Video stays video, audio-first sources stay audio, and YouTube follows each user's saved preference. | **✨ Clean delivery**<br>Media carries no caption or source URL, and non-audio filenames are randomized. Status, source links, and actions remain separate. |
+| **📚 Built for collections**<br>Single links, batches, albums, and playlists share the same durable PostgreSQL and Redis-backed workflow. | **🔐 Private by design**<br>Invitation checks cover private chats, groups, Business messages, callbacks, and inline mode. |
 
-The original message is removed when the bot has permission. Delivered media contains only the file or media group; source links and follow-up actions stay in a separate message.
-
-The bot is deliberately not open to everyone. An administrator creates short invitation codes, and the same access check protects private chats, groups, Telegram Business messages, callbacks, and inline mode.
+The bot and workers run as separate processes. PostgreSQL stores canonical state, Redis Streams carries jobs and progress, and shared artifact storage connects downloading to Telegram delivery.
 
 > [!WARNING]
 > Media Pocket does not bypass provider access controls. Private, deleted, region-restricted, or authentication-gated content may require valid cookies or may remain unavailable. Operators are responsible for complying with provider rules and local law.
 
-> [!TIP]
-> [Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker) is an optional companion project for keeping provider cookie jars refreshed. Media Pocket does not bundle it; operators configure the broker and cookie-sync connection separately.
+## Platforms
 
-## Bot and worker, separated
+| Source | Natural mode | Available handling |
+| --- | --- | --- |
+| YouTube | user preference | video, audio, playlists, quality selection |
+| TikTok | media | audio extraction and file delivery |
+| Instagram | media | posts, albums, audio extraction, file delivery |
+| X / Twitter | media | posts, audio extraction, file delivery |
+| Threads | media | posts, audio extraction, file delivery |
+| Pinterest | media | posts, audio extraction, file delivery |
+| Spotify | audio | tracks, albums, playlists, native audio or fallback |
+| SoundCloud | audio | tracks and file delivery |
+| Zaycev.net | audio | tracks and file delivery |
+| HitMoz | audio | tracks, albums, and direct CLI downloads |
+| Generic HTTP(S) | detected | yt-dlp resolution where supported |
 
-> **Telegram → Bot → Redis queue → Worker → Shared artifacts → Bot → Telegram**
+Video sources can offer **Video** or **Audio**, **Best / 1080p / 720p / 480p**, and **Media** or **File** delivery where those choices apply. Social posts do not show a fake resolution selector. Audio-first providers expose only relevant controls.
 
-Only the bot process holds a Telegram client. Workers resolve and download media, report structured progress through Redis, and leave delivery to the bot.
+Video is normalized to streaming-compatible MP4 with H.264/AAC. Audio is normalized to M4A with AAC-LC and includes title, performer, duration, and thumbnail metadata when the provider supplies it.
 
----
+## How downloads behave
 
-## 🚀 Quick start
+1. **Resolve** — identify the provider and apply its natural mode or the user's YouTube preference.
+2. **Queue** — persist a job snapshot and atomically enqueue it for a worker.
+3. **Process** — update one status message with queue position, progress, speed, size, and ETA when available.
+4. **Deliver** — send only the file or media group, remove the technical status after success, and keep optional actions in a separate message.
 
-### 🤖 1. Prepare the Telegram bot
+Ordinary links start immediately. YouTube can be configured per user as **Video**, **Audio**, or **Always ask**; only **Always ask** opens the 15-minute selection card. Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` requests always start immediately and override the saved mode.
 
-Create a bot with [@BotFather](https://t.me/BotFather) and keep its token private.
+For batches, each link keeps its provider-native mode. If a batch contains YouTube and **Always ask** is enabled, one choice applies to the batch, with the nearest valid fallback for incompatible items.
 
-For inline downloads, use `/setinline`, then `/setinlinefeedback` and choose **Enabled**. Media Pocket confirms an inline download from Telegram's chosen-result update, so sampled feedback modes such as `1/10` or `1/100` are not suitable.
+Failures remain visible as a compact card with a human-readable reason, a next step, retry, format change, and help actions. Tracebacks, provider internals, and internal error codes are never shown to users.
 
-If the bot must receive ordinary links in groups without being mentioned, adjust its group privacy setting in BotFather as well.
+## Deployment
 
-The bundled local Telegram Bot API service also needs `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from [my.telegram.org](https://my.telegram.org/).
+### Requirements
 
-### 🐳 2. Configure the server
+- a Linux host with Docker Engine and the Docker Compose plugin;
+- Git;
+- a Telegram bot token from [@BotFather](https://t.me/BotFather);
+- Telegram API credentials from [my.telegram.org](https://my.telegram.org/);
+- enough CPU, memory, storage, and network capacity for FFmpeg and the intended worker concurrency.
+
+Spotify Premium and provider cookies are optional and only needed for the corresponding provider paths.
+
+### 1. Prepare Telegram
+
+Create the bot with [@BotFather](https://t.me/BotFather) and keep its token private.
+
+For inline downloads, run `/setinline`, then `/setinlinefeedback` and choose **Enabled**. Media Pocket confirms an inline download from Telegram's chosen-result update, so sampled feedback modes such as `1/10` or `1/100` are not suitable.
+
+If the bot should receive ordinary links in groups without being mentioned, adjust its group privacy setting in BotFather. The bundled local Telegram Bot API service requires `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`.
+
+### 2. Configure the host
 
 ```bash
-git clone https://github.com/segfault-stack/media-pocket.git
+git clone --recurse-submodules https://github.com/segfault-stack/media-pocket.git
 cd media-pocket
-git submodule update --init --recursive
 
 cp .env.example .env
 cp docker-compose.example.yml docker-compose.yml
 ```
 
-Set at least these values in `.env`:
+Set the four required values in `.env`:
 
 ```env
 BOT_TOKEN=replace-with-bot-token
@@ -76,23 +107,13 @@ TELEGRAM_API_ID=replace-with-api-id
 TELEGRAM_API_HASH=replace-with-api-hash
 ```
 
-Build the image and initialize the database:
+### 3. Build and initialize
 
 ```bash
 docker compose build
 docker compose up -d postgres redis telegram-bot-api
 docker compose run --rm migrate
 ```
-
-The application image contains only the Python environment and media toolchain. Compose bind-mounts the checkout at `/app` read-only, with separate writable volumes for downloads, logs, cookies, and Spotify state. Restart the bot and workers after source changes; rebuild the image only when dependencies or toolchain versions change.
-
-### YouTube extraction stack
-
-The image pins yt-dlp with its default extras and recommended `curl-cffi` browser-impersonation transport, the yt-dlp EJS challenge scripts, Deno, and FFmpeg/ffprobe. Compose also starts the matching Deno-based BgUtils PO-token provider, while the Python plugin connects yt-dlp to that private sidecar automatically. YouTube extraction uses the `mweb` client so GVS PO tokens are requested automatically. `YOUTUBE_POT_PROVIDER_URL` can override the internal endpoint.
-
-This is compatibility plumbing, not an access-control bypass: cookies may still be required for account-gated material, rate limits still apply, and YouTube can change extraction requirements without notice.
-
-### 🔐 3. Add the first administrator
 
 The bot refuses to start until PostgreSQL contains at least one administrator:
 
@@ -105,108 +126,56 @@ Start the bot and one or more workers:
 
 ```bash
 docker compose up -d --scale worker=2
+docker compose ps
 ```
 
-Open the bot, run `/admin`, create an invitation code, and share it with the people who should have access.
+The image contains the locked Python environment and media toolchain. Compose mounts the checkout at `/app` read-only and provides separate writable volumes for downloads, logs, cookies, and Spotify state. Restart the bot and workers after source changes; rebuild only when dependencies or the toolchain change.
 
----
+## Using the bot
 
-## 🔎 What happens after a link?
+Open the bot, run `/admin`, create an invitation code, and redeem it from each account that should have access. Then send a supported link or several links in one message.
 
-```text
-link received
-      │
-      ▼
-┌─────────────────────┐
-│ natural mode        │
-│ or YouTube ask card │
-└──────────┬──────────┘
-           │ immediate / Download
-           ▼
-┌─────────────────────┐
-│ PostgreSQL snapshot │
-│ atomic confirmation │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Redis worker queue  │
-│ retry + cancellation│
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ progress in one msg │
-│ 64% · speed · ETA   │
-└──────────┬──────────┘
-           │
-           ▼
-      media delivered
-           │
-           ├── status message disappears
-           └── actions arrive separately
-```
-
-Ordinary links start immediately: audio-first services use audio, social posts keep their media type, and video sources use video. YouTube follows the user's saved **Video**, **Audio**, or **Always ask** setting. Only **Always ask** opens the 15-minute selection card.
-
-Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` commands always override the saved mode and start immediately.
-
-For an automatic batch, each link keeps its provider-native mode. If the batch contains YouTube and **Always ask** is enabled, one selection applies to the batch; an inapplicable choice falls back to the nearest valid mode for that item.
-
-Failures remain visible as a compact card with a human-readable reason, a next step, retry, format change, and help actions. Tracebacks and provider internals are not shown to users.
-
----
-
-## 🌐 Platforms and formats
-
-| Source | What Media Pocket handles |
+| Command | Purpose |
 | --- | --- |
-| YouTube | video, audio, playlists, quality selection |
-| TikTok | media posts, audio extraction, file delivery |
-| Instagram | media posts and albums, audio extraction, file delivery |
-| X / Twitter | media posts, audio extraction, file delivery |
-| Threads | media posts, audio extraction, file delivery |
-| Pinterest | media posts, audio extraction, file delivery |
-| SoundCloud | audio and file delivery |
-| Spotify | tracks, albums, and playlists through native audio or fallback |
-| Zaycev.net | tracks and file delivery |
-| HitMoz | tracks, albums, and direct CLI downloads |
-| Generic HTTP(S) | provider resolution through yt-dlp where supported |
-
-Video sources offer **Video** or **Audio**, **Best / 1080p / 720p / 480p**, and **Media** or **File** delivery where those choices apply. Social posts avoid a fake resolution selector. Audio-first providers show only relevant audio and file controls.
-
-Video delivery is normalized to streaming-compatible MP4 with H.264/AAC. Audio delivery is normalized to M4A with AAC-LC and carries title, performer, duration, and thumbnail metadata when the provider supplies it.
-
----
-
-## 🎛️ Telegram workflow
-
-- `/start` — onboarding, inline shortcut, settings, help, group installation, and sharing;
-- `/help` — platforms, formats, batches, inline mode, and limitations;
-- `/settings` — download quality, delivery, action buttons, source cleanup, and compact progress;
-- `/status` — the current user's active and recent jobs, cancellation, and retry;
-- `/audio URL` and `/video URL` — immediate format-specific downloads;
-- `@your_bot URL` — inline submission for already invited users;
-- `/admin` — invitation management for administrators.
+| `/start` | onboarding, inline shortcut, settings, help, group installation, and sharing |
+| `/help` | platforms, formats, batches, inline mode, and limitations |
+| `/settings` | YouTube default, quality, delivery, result actions, cleanup, and progress detail |
+| `/status` | the current user's active and recent jobs, cancellation, and retry |
+| `/audio URL` | download immediately as audio |
+| `/video URL` | download immediately as video |
+| `/redeem CODE` | unlock access with an invitation |
+| `/admin` | create, list, share, and revoke invitations |
+| `@your_bot URL` | submit inline from any chat after access is granted |
 
 Single results can expose contextual actions such as **Get audio**, **Get video**, **Send as file**, **Source**, and **Share**. Albums are delivered as media groups followed by one compact action card.
 
----
+## Invite-only access
 
-## 🎟️ Invite-only by design
+At least one administrator must be created from the command line before the bot starts. Administrators can generate:
 
-An administrator can create:
+- **single-use invites** — one redemption, no expiry;
+- **limited-use invites** — any configured limit from 2 to 100,000 redemptions, no expiry;
+- **timed invites** — multiple redemptions until the configured expiry.
 
-- a one-use code that never expires and can be redeemed once;
-- a timed code that can be redeemed by multiple users until its expiry.
+Users send the bare code or `/redeem CODE`. A successful redemption grants access until the database record is changed by the operator.
 
-Users send the bare code or `/redeem CODE`. Successful redemption grants permanent access until the database record is changed by the operator.
+Inline mode is not a side door: unauthorized users only receive a prompt to open the private chat and enter a code. Callback ownership is checked as well, so another user cannot confirm, cancel, or retry someone else's request.
 
-Inline queries are not a side door: unauthorized users receive only a prompt to open the private chat and enter an invitation code. Callback ownership is also checked, so another user cannot confirm, cancel, or retry someone else's request.
+## Provider setup
 
----
+<details>
+<summary><strong>YouTube compatibility stack</strong></summary>
 
-## 🎧 Spotify native audio
+The image pins yt-dlp with its default extras, the recommended `curl-cffi` browser-impersonation transport, yt-dlp EJS challenge scripts, Deno, and FFmpeg/ffprobe.
+
+Compose starts the matching Deno-based BgUtils PO-token provider. The Python plugin connects yt-dlp to that private sidecar, and YouTube extraction uses the `mweb` client so GVS PO tokens are requested automatically. `YOUTUBE_POT_PROVIDER_URL` can override the internal endpoint.
+
+This is compatibility plumbing, not an access-control bypass. Cookies may still be required for account-gated material, rate limits still apply, and YouTube can change extraction requirements without notice.
+
+</details>
+
+<details>
+<summary><strong>Spotify Premium audio</strong></summary>
 
 The image builds a pinned librespot-based `spotify-streamer` helper from the included Git submodule. With a deployment-owned Spotify Premium session, tracks, albums, and playlists use native Spotify audio first. If authentication is missing or an individual native stream fails, Media Pocket falls back to its YouTube search path.
 
@@ -226,15 +195,16 @@ scripts/spotify resolve https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6
 scripts/spotify reset-auth
 ```
 
-Spotify credentials are stored in PostgreSQL. The librespot cache lives in the `spotify_cache` Docker volume. `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are optional and support collection expansion for the fallback path; they are not Premium account credentials.
+Spotify credentials are stored in PostgreSQL. The librespot cache lives in the `spotify_cache` volume. `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are optional and support collection expansion for the fallback path; they are not Premium account credentials.
 
----
+</details>
 
-## 🍪 Optional provider cookies
+<details>
+<summary><strong>Provider cookies and Media Cookie Broker</strong></summary>
 
 yt-dlp can read a combined Netscape cookie jar or provider-specific files from `cookies/`. Treat every cookie file as a password and never commit it.
 
-The optional `cookie-broker` Compose profile can run a separately configured `cookie-sync` image and write updated cookie jars into the shared directory:
+The optional `cookie-broker` Compose profile can run a separately configured `cookie-sync` image and write refreshed cookie jars into the shared directory:
 
 ```bash
 # Configure COOKIE_BROKER_IMAGE, BROKER_URL, BROKER_USERNAME,
@@ -242,32 +212,57 @@ The optional `cookie-broker` Compose profile can run a separately configured `co
 docker compose --profile cookie-broker up -d cookie-sync
 ```
 
-The companion [Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker)
-is not bundled with Media Pocket. Its image, endpoint, credentials, and network policy
-are deployment choices.
+[Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker) is a related but separately deployed project. Media Pocket does not bundle it; its image, endpoint, credentials, and network policy remain operator choices.
 
----
+</details>
 
-## 🔐 Security
+## Security
 
 Media Pocket handles bot tokens, provider sessions, browser cookies, and user-submitted URLs.
 
-Keep these rules:
+- Never commit `.env`, `secrets/`, cookie jars, Spotify sessions, database dumps, or downloaded media.
+- Use a long random PostgreSQL password.
+- Keep the local Telegram Bot API, PostgreSQL, Redis, and the PO-token sidecar off the public internet.
+- Expose a cookie broker only through a protected network path.
+- Give invitations only to people you trust.
+- Match download-size and worker-concurrency limits to the host.
+- Rotate a credential immediately if it appears in logs, chat, Git, or an image layer.
 
-- never commit `.env`, `secrets/`, cookie jars, Spotify sessions, database dumps, or downloaded media;
-- use a long random PostgreSQL password;
-- keep the local Telegram Bot API and PostgreSQL off the public internet;
-- expose a cookie broker only through a protected network path;
-- give invitations only to people you trust;
-- keep the bot's download-size and worker-concurrency limits appropriate for the host;
-- rotate a credential immediately if it appears in logs, chat, Git, or an image layer.
-
-The provided `.gitignore` and `.dockerignore` block common credential and artifact paths, but they do not replace operator review.
-
----
+The provided `.gitignore` and `.dockerignore` block common credential and artifact paths, but they do not replace operator review. CI runs secret and dependency scans on every push and pull request, plus a weekly vulnerability rescan.
 
 <details>
-<summary><strong>🏗️ Architecture</strong></summary>
+<summary><strong>Runtime configuration</strong></summary>
+
+### Required by the Compose deployment
+
+| Variable | Purpose |
+| --- | --- |
+| `BOT_TOKEN` | Telegram bot credential |
+| `POSTGRES_PASSWORD` | PostgreSQL password used by the stack |
+| `TELEGRAM_API_ID` | local Telegram Bot API application ID |
+| `TELEGRAM_API_HASH` | local Telegram Bot API application hash |
+
+### Common overrides
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `DATABASE_URL` | direct process execution; Compose sets it automatically | required outside Compose |
+| `REDIS_URL` | Redis connection URL | `redis://redis:6379/0` |
+| `CUSTOM_API_URL` | Telegram Bot API endpoint | `https://api.telegram.org` in code |
+| `YOUTUBE_POT_PROVIDER_URL` | BgUtils PO-token provider endpoint | `http://youtube-pot-provider:4416` in Compose |
+| `ARTIFACT_ROOT` | shared download directory | `downloads` |
+| `DOWNLOAD_MAX_FILE_SIZE` | maximum artifact size in bytes | `2000000000` |
+| `MAX_PARALLEL_DOWNLOADS` | concurrent downloads per worker | `4` |
+| `ARTIFACT_RETENTION_SECONDS` | completed artifact retention | `86400` |
+| `UX_SELECTION_FLOW` | honor YouTube's **Always ask** picker | `true` |
+| `SPOTIFY_BITRATE` | native Spotify bitrate: 96, 160, or 320 | `320` |
+
+[.env.example](.env.example) is the safe Compose starting point. Complete runtime defaults live in [`Settings`](downloader_bot/bootstrap/settings.py).
+
+</details>
+
+<details>
+<summary><strong>Architecture</strong></summary>
 
 Dependencies point inward:
 
@@ -283,36 +278,13 @@ bootstrap → adapters / infrastructure → application → domain
 
 PostgreSQL is canonical state. Redis Streams carries work and progress. Selection requests survive restarts, confirmation is atomic, active jobs are deduplicated, pending Redis messages can be reclaimed, and completed artifacts are retained for a bounded period.
 
-See [architecture details](docs/architecture-v2.md) and the [behavior inventory](docs/behavior-inventory.md).
+See [architecture details](docs/architecture-v2.md), the [code map](docs/code-map.md), and the [behavior inventory](docs/behavior-inventory.md).
 
 </details>
 
-<details>
-<summary><strong>⚙️ Runtime configuration</strong></summary>
+## Development
 
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `BOT_TOKEN` | Telegram bot credential | required for bot |
-| `DATABASE_URL` | PostgreSQL connection URL outside Compose | required |
-| `POSTGRES_PASSWORD` | Password used by the Compose stack | required in Compose |
-| `REDIS_URL` | Redis connection URL | `redis://redis:6379/0` |
-| `CUSTOM_API_URL` | Telegram Bot API endpoint | `https://api.telegram.org` in code |
-| `ARTIFACT_ROOT` | Shared download directory | `downloads` |
-| `DOWNLOAD_MAX_FILE_SIZE` | Maximum artifact size in bytes | `2000000000` |
-| `MAX_PARALLEL_DOWNLOADS` | Concurrent downloads per worker | `4` |
-| `ARTIFACT_RETENTION_SECONDS` | Completed artifact retention | `86400` |
-| `UX_SELECTION_FLOW` | Honor YouTube's `Always ask` picker | `true` |
-| `SPOTIFY_BITRATE` | Native Spotify bitrate: 96, 160, or 320 | `320` |
-
-[.env.example](.env.example) is the safe Compose starting point. The complete runtime defaults are implemented in [`Settings`](downloader_bot/bootstrap/settings.py).
-
-</details>
-
----
-
-## 🧪 Development
-
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the locked development environment:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the locked Python 3.14 environment:
 
 ```bash
 uv sync --locked
@@ -323,7 +295,7 @@ uv run python -m compileall -q downloader_bot main.py
 uv run pytest --cov=downloader_bot --cov-fail-under=80
 ```
 
-Install the fast Git hook runner once per checkout and run the same gate manually when needed:
+Install and run the local quality gate:
 
 ```bash
 uv run prek install
@@ -331,37 +303,31 @@ uv run prek run --all-files
 scripts/security-check
 ```
 
-`uv.lock` is the single dependency lock for both the runtime image and local development. Prek checks file integrity, the lockfile, Ruff, and ty before commits. The security script runs pinned Gitleaks and Trivy containers against Git history, dependencies, and deployment configuration; its first run downloads the scanner images and vulnerability database. GitHub Actions runs these checks and the network-free acceptance suite on pushes and pull requests, with a weekly vulnerability rescan.
+| Tool | Role |
+| --- | --- |
+| uv | Python and dependency locking |
+| Ruff | linting and formatting checks |
+| ty | static type checking |
+| prek | local pre-commit orchestration |
+| pytest | network-free acceptance tests and coverage |
+| Gitleaks / Trivy | secret, dependency, and deployment scans |
 
-The development stack is intentionally small:
+`uv.lock` is shared by local development and the runtime image. The acceptance suite mocks Telegram, providers, PostgreSQL repositories, and Redis Streams. Production-code coverage must remain at least 80%.
 
-- **uv** manages Python 3.14 and the fully locked environment;
-- **Ruff** handles linting and formatting checks;
-- **ty** performs static type checking;
-- **prek** runs the local pre-commit gate;
-- **pytest** enforces at least 80% production-code coverage;
-- **Gitleaks** and **Trivy** scan committed history, dependency locks, and deployment files.
+## Current boundaries
 
-Docker builds the reproducible runtime environment and media toolchain, not a private copy of the application source. Compose mounts the checkout read-only and gives only runtime data directories writable volumes. This keeps source edits fast during self-hosted development while preserving a pinned environment through `uv.lock` and the container image.
-
----
-
-## 🚧 Current boundaries
-
-- self-hosted deployment only; there is no hosted service;
-- no web administration panel;
-- provider availability can change when upstream sites change;
-- private or authentication-gated media needs valid operator-supplied cookies and may still fail;
-- native Spotify audio needs a deployment-owned Premium session;
-- Telegram and local storage limits still apply;
-- cancellation is cooperative and may not interrupt every provider operation instantly;
-- the bot does not automate login, CAPTCHA, 2FA, or provider account recovery.
-
----
+- Self-hosted deployment only; there is no hosted service.
+- There is no web administration panel.
+- Provider availability can change when upstream sites change.
+- Private or authentication-gated media needs valid operator-supplied cookies and may still fail.
+- Native Spotify audio needs a deployment-owned Premium session.
+- Telegram and local storage limits still apply.
+- Cancellation is cooperative and may not interrupt every provider operation instantly.
+- The bot does not automate login, CAPTCHA, 2FA, or provider account recovery.
 
 <div align="center">
 
-### 📥 One link in. Clean media out.
+**One link in. Clean media out.**
 
 MIT — see [LICENCE](LICENCE).
 
