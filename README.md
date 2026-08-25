@@ -24,7 +24,7 @@
 
 Media Pocket turns Telegram into a private media inbox. Send one link or a batch, choose the format once, and let workers handle extraction, conversion, and delivery.
 
-> **link → format picker → live progress → clean media**
+> **link → provider-native mode → live progress → clean media**
 
 The original message is removed when the bot has permission. Delivered media contains only the file or media group; source links and follow-up actions stay in a separate message.
 
@@ -32,6 +32,9 @@ The bot is deliberately not open to everyone. An administrator creates short inv
 
 > [!WARNING]
 > Media Pocket does not bypass provider access controls. Private, deleted, region-restricted, or authentication-gated content may require valid cookies or may remain unavailable. Operators are responsible for complying with provider rules and local law.
+
+> [!TIP]
+> [Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker) is an optional companion project for keeping provider cookie jars refreshed. Media Pocket does not bundle it; operators configure the broker and cookie-sync connection separately.
 
 ## Two processes by design
 
@@ -106,6 +109,14 @@ docker compose up -d postgres redis telegram-bot-api
 docker compose run --rm migrate
 ```
 
+The application image contains only the Python environment and media toolchain. Compose bind-mounts the checkout at `/app` read-only, with separate writable volumes for downloads, logs, cookies, and Spotify state. Restart the bot and workers after source changes; rebuild the image only when dependencies or toolchain versions change.
+
+### YouTube extraction stack
+
+The image pins yt-dlp with its default extras and recommended `curl-cffi` browser-impersonation transport, the yt-dlp EJS challenge scripts, Deno, and FFmpeg/ffprobe. Compose also starts the matching Deno-based BgUtils PO-token provider, while the Python plugin connects yt-dlp to that private sidecar automatically. YouTube extraction uses the `mweb` client so GVS PO tokens are requested automatically. `YOUTUBE_POT_PROVIDER_URL` can override the internal endpoint.
+
+This is compatibility plumbing, not an access-control bypass: cookies may still be required for account-gated material, rate limits still apply, and YouTube can change extraction requirements without notice.
+
 ### 🔐 3. Add the first administrator
 
 The bot refuses to start until PostgreSQL contains at least one administrator:
@@ -132,10 +143,10 @@ link received
       │
       ▼
 ┌─────────────────────┐
-│ provider-aware card │
-│ mode / quality/file │
+│ natural mode        │
+│ or YouTube ask card │
 └──────────┬──────────┘
-           │ Download
+           │ immediate / Download
            ▼
 ┌─────────────────────┐
 │ PostgreSQL snapshot │
@@ -161,9 +172,11 @@ link received
            └── actions arrive separately
 ```
 
-Ordinary links open a 15-minute selection card. Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` commands skip the picker and start immediately.
+Ordinary links start immediately: audio-first services use audio, social posts keep their media type, and video sources use video. YouTube follows the user's saved **Video**, **Audio**, or **Always ask** setting. Only **Always ask** opens the 15-minute selection card.
 
-For a batch, one selection applies to every link. If a choice does not make sense for one item, the worker uses the nearest valid option for that item.
+Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` commands always override the saved mode and start immediately.
+
+For an automatic batch, each link keeps its provider-native mode. If the batch contains YouTube and **Always ask** is enabled, one selection applies to the batch; an inapplicable choice falls back to the nearest valid mode for that item.
 
 Failures remain visible as a compact card with a human-readable reason, a next step, retry, format change, and help actions. Tracebacks and provider internals are not shown to users.
 
@@ -254,7 +267,9 @@ The optional `cookie-broker` Compose profile can run a separately configured `co
 docker compose --profile cookie-broker up -d cookie-sync
 ```
 
-The broker itself is not bundled with Media Pocket. The image, endpoint, credentials, and network policy are deployment choices.
+The companion [Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker)
+is not bundled with Media Pocket. Its image, endpoint, credentials, and network policy
+are deployment choices.
 
 ---
 
@@ -311,7 +326,7 @@ See [architecture details](docs/architecture-v2.md) and the [behavior inventory]
 | `DOWNLOAD_MAX_FILE_SIZE` | Maximum artifact size in bytes | `2000000000` |
 | `MAX_PARALLEL_DOWNLOADS` | Concurrent downloads per worker | `4` |
 | `ARTIFACT_RETENTION_SECONDS` | Completed artifact retention | `86400` |
-| `UX_SELECTION_FLOW` | Show the format picker for ordinary links | `true` |
+| `UX_SELECTION_FLOW` | Honor YouTube's `Always ask` picker | `true` |
 | `SPOTIFY_BITRATE` | Native Spotify bitrate: 96, 160, or 320 | `320` |
 
 [.env.example](.env.example) is the safe Compose starting point. The complete runtime defaults are implemented in [`Settings`](downloader_bot/bootstrap/settings.py).

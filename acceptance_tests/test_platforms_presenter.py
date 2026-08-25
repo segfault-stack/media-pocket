@@ -10,6 +10,8 @@ from downloader_bot.adapters.telegram.presenter import (
     render_progress,
     render_selection,
     selection_keyboard,
+    settings_home_text,
+    settings_page,
 )
 from downloader_bot.domain import (
     DeliveryMode,
@@ -136,6 +138,38 @@ async def test_ytdlp_fixture_maps_album_assets_and_photos(monkeypatch) -> None:
         "https://instagram.com/p/x", UserPreferences(quality="720")
     )
     assert [asset.kind for asset in post.assets] == [MediaKind.PHOTO, MediaKind.VIDEO]
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_passes_configured_po_token_provider(monkeypatch) -> None:
+    command = ()
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"url":"https://cdn/video.mp4","ext":"mp4"}', b""
+
+    async def create(*args, **_kwargs):
+        nonlocal command
+        command = args
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    await YtDlpPlatformAdapter(
+        Platform.YOUTUBE,
+        youtube_pot_provider_url="http://youtube-pot-provider:4416",
+    ).resolve("https://youtube.com/watch?v=x", UserPreferences())
+
+    extractor_args = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--extractor-args"
+    ]
+    assert extractor_args == [
+        "youtube:player_client=mweb",
+        "youtubepot-bgutilhttp:base_url=http://youtube-pot-provider:4416",
+    ]
 
 
 @pytest.mark.asyncio
@@ -729,6 +763,20 @@ def test_audio_selection_hides_video_quality_and_uses_compact_actions() -> None:
     assert not any(label in labels for label in ("✓ Best", "1080p", "720p", "480p"))
     assert "🎧 Audio · ▶️ In chat" in text
     assert [button.text for button in keyboard[-1]] == ["⬇️ Download", "Cancel"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "label"),
+    (("video", "Video"), ("audio", "Audio"), ("ask", "Always ask")),
+)
+def test_download_settings_show_youtube_start_mode(mode, label) -> None:
+    preferences = UserPreferences(youtube_mode=mode)
+    text, keyboard = settings_page(preferences, "download")
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    assert f"YouTube: {label}" in text
+    assert f"YouTube: {label}" in settings_home_text(preferences)
+    selected = [button for button in buttons if button.text.startswith("✓ ")]
+    assert any(button.callback_data == f"settings:youtube:{mode}" for button in selected)
 
 
 def test_progress_renders_structured_metrics_and_batch_counter() -> None:

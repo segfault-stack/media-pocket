@@ -5,7 +5,9 @@ from datetime import timedelta
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     ChosenInlineResult,
@@ -25,6 +27,9 @@ from .presenter import (
     ADMIN_HOME_TEXT,
     ADMIN_INVITE_CREATED_TEXT,
     ADMIN_INVITE_REVOKED_TOAST,
+    ADMIN_LIMITED_DETAILS,
+    ADMIN_LIMITED_INVALID_TEXT,
+    ADMIN_LIMITED_PROMPT_TEXT,
     ADMIN_ONE_USE_DETAILS,
     ADMIN_TIMED_DETAILS,
     ALREADY_HANDLED_TEXT,
@@ -50,6 +55,7 @@ from .presenter import (
     admin_invite_result_keyboard,
     admin_invites_keyboard,
     admin_invites_list_keyboard,
+    admin_limited_invite_keyboard,
     inline_pending_keyboard,
     render_active_invites,
     render_stats,
@@ -69,6 +75,10 @@ _VIDEO_COMMAND_RE = re.compile(
     r"^\s*[!/](?:video|v)(?:@[a-z0-9_]+)?(?:\s+|$)", re.IGNORECASE
 )
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}>\"'"
+
+
+class AdminInviteForm(StatesGroup):
+    waiting_for_max_uses = State()
 
 
 def build_router(
@@ -96,6 +106,7 @@ def build_router(
     generate_invite=None,
     list_invites=None,
     revoke_invite=None,
+    plan_submission=None,
 ) -> Router:
     router = Router(name="downloads-v2")
     admin_router = Router(name="invite-admin")
@@ -197,6 +208,12 @@ def build_router(
                 }
             ):
                 changes["quality"] = parts[2]
+            elif (
+                parts[1] == "youtube"
+                and len(parts) == 3
+                and parts[2] in {"video", "audio", "ask"}
+            ):
+                changes["youtube_mode"] = parts[2]
             else:
                 await query.answer(UNKNOWN_SETTING_TEXT, show_alert=True)
                 return
@@ -222,7 +239,9 @@ def build_router(
         await message.answer(render_stats(values))
 
     @router.message(Command("admin"))
-    async def show_admin(message: Message) -> None:
+    async def show_admin(
+        message: Message, state: FSMContext | None = None
+    ) -> None:
         if not message.from_user:
             return
         allowed = message.from_user.id in admin_ids
@@ -231,20 +250,91 @@ def build_router(
         if not allowed:
             await message.answer(NO_PERMISSION_TEXT)
             return
+        if state is not None:
+            await state.clear()
         await message.answer(ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard())
 
     @admin_router.callback_query(F.data == "adm:home")
-    async def admin_home(query: CallbackQuery) -> None:
+    async def admin_home(
+        query: CallbackQuery, state: FSMContext | None = None
+    ) -> None:
+        if state is not None:
+            await state.clear()
         if isinstance(query.message, Message):
             await query.message.edit_text(
                 ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard()
             )
         await query.answer()
 
+    @admin_router.callback_query(F.data == "adm:new:limited")
+    async def admin_request_limited_invite(
+        query: CallbackQuery, state: FSMContext
+    ) -> None:
+        await state.set_state(AdminInviteForm.waiting_for_max_uses)
+        if isinstance(query.message, Message):
+            await query.message.edit_text(
+                ADMIN_LIMITED_PROMPT_TEXT,
+                reply_markup=admin_limited_invite_keyboard(),
+            )
+        await query.answer()
+
+    @admin_router.callback_query(F.data == "adm:limited:cancel")
+    async def admin_cancel_limited_invite(
+        query: CallbackQuery, state: FSMContext
+    ) -> None:
+        await state.clear()
+        if isinstance(query.message, Message):
+            await query.message.edit_text(
+                ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard()
+            )
+        await query.answer()
+
+    @admin_router.message(AdminInviteForm.waiting_for_max_uses)
+    async def admin_create_limited_invite(
+        message: Message, state: FSMContext
+    ) -> None:
+        value = (message.text or "").strip()
+        if value.lower() == "/cancel":
+            await state.clear()
+            await message.answer(
+                ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard()
+            )
+            return
+        if (
+            not value.isascii()
+            or not value.isdigit()
+            or not 2 <= int(value) <= 100_000
+        ):
+            await message.answer(
+                ADMIN_LIMITED_INVALID_TEXT,
+                reply_markup=admin_limited_invite_keyboard(),
+            )
+            return
+        if generate_invite is None or not message.from_user:
+            return
+        max_uses = int(value)
+        invite = await generate_invite.execute(
+            message.from_user.id,
+            InviteKind.LIMITED,
+            max_uses=max_uses,
+        )
+        await state.clear()
+        await message.answer(
+            ADMIN_INVITE_CREATED_TEXT.format(
+                code=invite.code,
+                details=ADMIN_LIMITED_DETAILS.format(max_uses=max_uses),
+            ),
+            reply_markup=admin_invite_result_keyboard(invite.code),
+        )
+
     @admin_router.callback_query(F.data.startswith("adm:new:"))
-    async def admin_create_invite(query: CallbackQuery) -> None:
+    async def admin_create_invite(
+        query: CallbackQuery, state: FSMContext | None = None
+    ) -> None:
         if not query.data or generate_invite is None:
             return
+        if state is not None:
+            await state.clear()
         preset = query.data.rsplit(":", 1)[-1]
         lifetimes = {
             "24h": (timedelta(hours=24), "24 hours"),
@@ -305,8 +395,8 @@ def build_router(
             )
         await query.answer(ADMIN_INVITE_REVOKED_TOAST)
 
-    @router.message(F.text)
-    @router.business_message(F.text)
+    @router.message(StateFilter(None), F.text)
+    @router.business_message(StateFilter(None), F.text)
     async def links(message: Message) -> None:
         if not message.from_user or not message.text:
             return
@@ -327,11 +417,16 @@ def build_router(
             if message.chat.type != ChatType.PRIVATE
             else JobKind.DIRECT
         )
+        plan = None
+        if not audio_only and not video_only and plan_submission is not None:
+            plan = await plan_submission.execute(message.from_user.id, urls)
         if (
             ux_selection_flow
             and create_selection is not None
             and not audio_only
             and not video_only
+            and plan is not None
+            and plan.ask_for_youtube
         ):
             selection = await create_selection.execute(
                 user_id=message.from_user.id,
@@ -356,6 +451,7 @@ def build_router(
             submit_batch,
             gateway,
             jobs,
+            audio_only_by_url=plan.audio_only_by_url if plan is not None else None,
         )
         await _delete_source_if_enabled(message, settings, gateway)
 
@@ -508,6 +604,25 @@ def build_router(
     async def inline(query: InlineQuery) -> None:
         urls = _extract_urls(query.query)
         if urls:
+            plan = (
+                await plan_submission.execute(query.from_user.id, (urls[0],))
+                if plan_submission is not None
+                else None
+            )
+            if (
+                ux_selection_flow
+                and plan is not None
+                and plan.ask_for_youtube
+            ):
+                await query.answer(
+                    [],
+                    cache_time=1,
+                    is_personal=True,
+                    button=InlineQueryResultsButton(
+                        text=INLINE_OPEN_PRIVATE_TEXT, start_parameter="inline"
+                    ),
+                )
+                return
             if create_selection is not None:
                 selection = await create_selection.execute(
                     user_id=query.from_user.id,
@@ -532,6 +647,7 @@ def build_router(
                     chat_id=query.from_user.id,
                     url=urls[0],
                     kind=JobKind.INLINE,
+                    audio_only=bool(plan and plan.audio_only_by_url[0]),
                 )
             )
             result = InlineQueryResultArticle(
@@ -593,6 +709,8 @@ async def _submit_fast(
     submit_batch,
     gateway,
     jobs,
+    *,
+    audio_only_by_url=None,
 ) -> None:
     kind = (
         JobKind.BUSINESS
@@ -609,6 +727,7 @@ async def _submit_fast(
             source_message_id=message.message_id,
             business_connection_id=business_connection_id,
             audio_only=audio_only,
+            audio_only_by_url=audio_only_by_url,
         )
     else:
         job, _ = await submit.execute(
@@ -619,7 +738,9 @@ async def _submit_fast(
                 kind=kind,
                 source_message_id=message.message_id,
                 business_connection_id=business_connection_id,
-                audio_only=audio_only,
+                audio_only=audio_only_by_url[0]
+                if audio_only_by_url is not None
+                else audio_only,
             )
         )
     status_id = await gateway.show_status(
@@ -663,7 +784,7 @@ def _extract_urls(text: str | None) -> tuple[str, ...]:
 
 
 def _settings_page_for(field: str) -> str:
-    if field in {"quality", "default_audio_only"}:
+    if field in {"quality", "default_audio_only", "youtube_mode"}:
         return "download"
     if field in {"document_mode", "show_buttons"}:
         return "delivery"

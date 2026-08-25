@@ -23,6 +23,7 @@ def test_typed_settings_parse_all_runtime_options() -> None:
             "MAX_PARALLEL_DOWNLOADS": "4",
             "YTDLP_COOKIES_FILE": "/cookies/cookies.txt",
             "YTDLP_YOUTUBE_COOKIES_FILE": "/cookies/youtube.txt",
+            "YOUTUBE_POT_PROVIDER_URL": "http://pot-provider:4416",
             "YTDLP_TIKTOK_COOKIES_FILE": "/cookies/tiktok.txt",
             "YTDLP_INSTAGRAM_COOKIES_FILE": "/cookies/instagram.txt",
             "YTDLP_X_COOKIES_FILE": "/cookies/x.txt",
@@ -34,6 +35,7 @@ def test_typed_settings_parse_all_runtime_options() -> None:
     assert settings.max_parallel_downloads == 4
     assert settings.cookies_file == "/cookies/cookies.txt"
     assert settings.youtube_cookies_file == "/cookies/youtube.txt"
+    assert settings.youtube_pot_provider_url == "http://pot-provider:4416"
     assert settings.tiktok_cookies_file == "/cookies/tiktok.txt"
     assert settings.instagram_cookies_file == "/cookies/instagram.txt"
     assert settings.x_cookies_file == "/cookies/x.txt"

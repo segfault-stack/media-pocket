@@ -74,6 +74,7 @@ async def run_bot(container: Container) -> None:
         retry_format=container.retry_format,
         bot_username=bot_identity.username,
         ux_selection_flow=container.settings.ux_selection_flow,
+        plan_submission=container.plan_submission,
         ux_analytics=container.analytics,
         access_control=container.access,
         generate_invite=container.generate_invite,

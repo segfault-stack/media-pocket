@@ -88,16 +88,20 @@ class Access:
         return True
 
 
-def test_invite_domain_enforces_exactly_one_policy() -> None:
+def test_invite_domain_enforces_each_policy() -> None:
     now = datetime.now(UTC)
     timed = InviteCode("ABC123", InviteKind.TIMED, 1, now, now + timedelta(hours=1))
     once = InviteCode("XYZ789", InviteKind.ONE_TIME, 1, now, max_uses=1)
+    limited = InviteCode("LIMIT234", InviteKind.LIMITED, 1, now, max_uses=25)
     assert timed.available_at(now)
     assert once.available_at(now)
+    assert limited.available_at(now)
     with pytest.raises(ValueError, match="timed invites require"):
         InviteCode("BAD123", InviteKind.TIMED, 1, now)
     with pytest.raises(ValueError, match="one-time invites require"):
         InviteCode("BAD456", InviteKind.ONE_TIME, 1, now, max_uses=2)
+    with pytest.raises(ValueError, match="limited invites require"):
+        InviteCode("BAD789", InviteKind.LIMITED, 1, now, max_uses=1)
 
 
 def test_generated_codes_are_short_unambiguous_alphanumeric() -> None:
@@ -107,21 +111,41 @@ def test_generated_codes_are_short_unambiguous_alphanumeric() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_generates_timed_and_one_time_invites_with_collision_retry() -> None:
+async def test_admin_generates_all_invite_policies_with_collision_retry() -> None:
     access = Access()
     access.invites["DUPL2345"] = InviteCode(
         "DUPL2345", InviteKind.ONE_TIME, TEST_ADMIN_ID, Clock().now(), max_uses=1
     )
-    values = iter(("DUPL2345", "GOOD2345", "ONCE2345"))
+    values = iter(("DUPL2345", "GOOD2345", "ONCE2345", "LIMIT234"))
     generate = GenerateInvite(access, Clock(), lambda: next(values))
     timed = await generate.execute(
         TEST_ADMIN_ID, InviteKind.TIMED, valid_for=timedelta(days=7)
     )
     once = await generate.execute(TEST_ADMIN_ID, InviteKind.ONE_TIME)
+    limited = await generate.execute(
+        TEST_ADMIN_ID, InviteKind.LIMITED, max_uses=25
+    )
     assert timed.code == "GOOD2345" and timed.expires_at == timed.created_at + timedelta(days=7)
     assert timed.max_uses is None
     assert once.code == "ONCE2345" and once.max_uses == 1 and once.expires_at is None
-    assert access.create_attempts == 3
+    assert limited.max_uses == 25 and limited.expires_at is None
+    assert access.create_attempts == 4
+    with pytest.raises(ValueError, match="between 2 and 100000"):
+        await generate.execute(TEST_ADMIN_ID, InviteKind.LIMITED, max_uses=1)
+
+
+@pytest.mark.asyncio
+async def test_limited_invite_is_consumed_only_after_its_max_uses() -> None:
+    access = Access()
+    now = Clock().now()
+    access.invites["LIMIT234"] = InviteCode(
+        "LIMIT234", InviteKind.LIMITED, TEST_ADMIN_ID, now, max_uses=2
+    )
+    redeem = RedeemInvite(access, Clock())
+
+    assert await redeem.execute(42, "LIMIT234") is InviteRedemption.ACCEPTED
+    assert await redeem.execute(43, "LIMIT234") is InviteRedemption.ACCEPTED
+    assert await redeem.execute(44, "LIMIT234") is InviteRedemption.USED
 
 
 @pytest.mark.asyncio

@@ -177,6 +177,21 @@ class Stub:
         return replace(UserPreferences(), **changes)
 
 
+class SubmissionPlanner:
+    def __init__(self, *, audio_only_by_url=(False,), ask_for_youtube=False) -> None:
+        self.audio_only_by_url = audio_only_by_url
+        self.ask_for_youtube = ask_for_youtube
+
+    async def execute(self, _user_id, urls):
+        modes = self.audio_only_by_url
+        if len(modes) != len(urls):
+            modes = tuple(index % 2 == 0 for index, _url in enumerate(urls))
+        return SimpleNamespace(
+            audio_only_by_url=modes,
+            ask_for_youtube=self.ask_for_youtube,
+        )
+
+
 def handler(router, observer: str, name: str):
     return next(
         item.callback
@@ -267,7 +282,7 @@ async def test_audio_command_aliases_keep_the_old_force_audio_behavior(command) 
 
 
 @pytest.mark.asyncio
-async def test_plain_link_uses_selection_but_video_command_is_fast_path() -> None:
+async def test_plain_youtube_link_starts_video_unless_user_always_asks() -> None:
     submit, batch, gateway = Submit(), Batch(), SelectionGateway()
     create, stub = SelectionCreator(), Stub()
     router = build_router(
@@ -284,6 +299,7 @@ async def test_plain_link_uses_selection_but_video_command_is_fast_path() -> Non
         create_selection=create,
         update_selection=stub,
         confirm_selection=stub,
+        plan_submission=SubmissionPlanner(),
     )
     base = {
         "from_user": SimpleNamespace(id=1),
@@ -293,12 +309,69 @@ async def test_plain_link_uses_selection_but_video_command_is_fast_path() -> Non
     }
     links = handler(router, "message", "links")
     await links(SimpleNamespace(**base, text="https://youtube.com/watch?v=x"))
-    assert not submit.commands
+    assert submit.commands[-1].audio_only is False
+    assert not gateway.selections
+
+    ask_router = build_router(
+        submit,
+        batch,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        gateway,
+        Jobs(),
+        create_selection=create,
+        update_selection=stub,
+        confirm_selection=stub,
+        plan_submission=SubmissionPlanner(ask_for_youtube=True),
+    )
+    await handler(ask_router, "message", "links")(
+        SimpleNamespace(**base, text="https://youtube.com/watch?v=ask")
+    )
     assert gateway.selections and create.bound[-1][-1] == 77
 
     await links(SimpleNamespace(**base, text="/video https://youtube.com/watch?v=x"))
     assert submit.commands[-1].audio_only is False
     assert gateway.status[-1][0].id == "single"
+
+
+@pytest.mark.asyncio
+async def test_plain_audio_first_link_and_mixed_batch_use_natural_modes() -> None:
+    submit, batch, gateway = Submit(), Batch(), Gateway()
+    stub = Stub()
+    router = build_router(
+        submit,
+        batch,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        gateway,
+        Jobs(),
+        plan_submission=SubmissionPlanner(audio_only_by_url=(True,)),
+    )
+    base = {
+        "from_user": SimpleNamespace(id=1),
+        "chat": SimpleNamespace(id=2, type=ChatType.PRIVATE),
+        "message_id": 3,
+        "business_connection_id": None,
+    }
+    links = handler(router, "message", "links")
+    await links(SimpleNamespace(**base, text="https://soundcloud.com/a/b"))
+    assert submit.commands[-1].audio_only
+
+    await links(
+        SimpleNamespace(
+            **base,
+            text="https://spotify.example/a https://instagram.example/b",
+        )
+    )
+    assert batch.calls[-1]["audio_only_by_url"] == (True, False)
 
 
 @pytest.mark.asyncio
@@ -321,17 +394,10 @@ async def test_inline_queues_same_job_and_returns_personal_placeholder() -> None
 
 
 @pytest.mark.asyncio
-async def test_inline_selection_waits_for_chosen_result_before_creating_job() -> None:
+async def test_inline_always_ask_routes_to_private_without_creating_job() -> None:
     submit, batch, gateway = Submit(), Batch(), Gateway()
     stub = Stub()
     create = SelectionCreator()
-    selection = await create.execute(
-        user_id=5,
-        chat_id=5,
-        urls=("https://example.com/video",),
-        kind=JobKind.INLINE,
-    )
-    confirm = Confirm(selection)
     router = build_router(
         submit,
         batch,
@@ -344,7 +410,8 @@ async def test_inline_selection_waits_for_chosen_result_before_creating_job() ->
         gateway,
         Jobs(),
         create_selection=create,
-        confirm_selection=confirm,
+        confirm_selection=stub,
+        plan_submission=SubmissionPlanner(ask_for_youtube=True),
     )
     answers = []
 
@@ -357,20 +424,10 @@ async def test_inline_selection_waits_for_chosen_result_before_creating_job() ->
         answer=answer,
     )
     await handler(router, "inline_query", "inline")(query)
-    result = answers[-1][0][0][0]
-    assert result.id == "inline:selection-token"
-    assert result.reply_markup.inline_keyboard[0][0].callback_data == (
-        "inline:pending:selection-token"
-    )
+    assert answers[-1][0][0] == []
+    assert answers[-1][1]["button"].start_parameter == "inline"
+    assert not create.calls
     assert not submit.commands
-
-    chosen = SimpleNamespace(
-        result_id=result.id,
-        inline_message_id="inline-message-id",
-        from_user=SimpleNamespace(id=5),
-    )
-    await handler(router, "chosen_inline_result", "chosen_inline")(chosen)
-    assert confirm.calls[-1][2] == {"inline_message_id": "inline-message-id"}
 
 
 @pytest.mark.asyncio
@@ -527,6 +584,7 @@ async def test_navigation_selection_status_and_result_callbacks(monkeypatch) -> 
     await handler(router, "callback_query", "callback_settings")(query)
     for data in (
         "settings:page:download",
+        "settings:youtube:ask",
         "settings:quality:720",
         "settings:set:document_mode:true",
         "settings:toggle:compact_progress",

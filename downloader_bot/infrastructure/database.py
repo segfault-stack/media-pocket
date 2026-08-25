@@ -91,7 +91,9 @@ class InviteRow(Base):
         CheckConstraint("use_count >= 0", name="ck_invite_use_count_nonnegative"),
         CheckConstraint(
             "(kind = 'timed' AND expires_at IS NOT NULL AND max_uses IS NULL) OR "
-            "(kind = 'one_time' AND expires_at IS NULL AND max_uses = 1)",
+            "(kind = 'one_time' AND expires_at IS NULL AND max_uses = 1) OR "
+            "(kind = 'limited' AND expires_at IS NULL "
+            "AND max_uses BETWEEN 2 AND 100000)",
             name="ck_invite_policy",
         ),
     )
@@ -136,6 +138,7 @@ class PreferencesRow(Base):
     delete_source: Mapped[bool] = mapped_column(Boolean, default=True)
     default_audio_only: Mapped[bool] = mapped_column(Boolean, default=False)
     compact_progress: Mapped[bool] = mapped_column(Boolean, default=False)
+    youtube_mode: Mapped[str] = mapped_column(String(16), default="video")
 
 
 class JobRow(Base):
@@ -436,8 +439,15 @@ class SqlSettingsRepository:
 
     async def save(self, user_id: int, preferences: UserPreferences) -> UserPreferences:
         values = {
-            name: getattr(preferences, name)
-            for name in UserPreferences.__dataclass_fields__
+            "quality": preferences.quality,
+            "audio_format": preferences.audio_format,
+            "captions": preferences.captions,
+            "document_mode": preferences.document_mode,
+            "show_buttons": preferences.show_buttons,
+            "delete_source": preferences.delete_source,
+            "default_audio_only": preferences.youtube_mode == "audio",
+            "compact_progress": preferences.compact_progress,
+            "youtube_mode": preferences.youtube_mode,
         }
         values["user_id"] = user_id
         async with self._sessions.begin() as session:
@@ -957,6 +967,9 @@ def _job(row: JobRow) -> Job:
 
 
 def _preferences(row: PreferencesRow) -> UserPreferences:
+    youtube_mode = row.youtube_mode or (
+        "audio" if row.default_audio_only else "video"
+    )
     return UserPreferences(
         quality=row.quality,
         audio_format=row.audio_format,
@@ -966,6 +979,7 @@ def _preferences(row: PreferencesRow) -> UserPreferences:
         delete_source=row.delete_source,
         default_audio_only=row.default_audio_only,
         compact_progress=row.compact_progress,
+        youtube_mode=youtube_mode,
     )
 
 

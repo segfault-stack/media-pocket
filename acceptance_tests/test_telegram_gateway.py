@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import PurePosixPath
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from aiogram.types import (
@@ -44,6 +45,11 @@ class Bot:
 
 def artifact(path, kind):
     return DownloadArtifact(PurePosixPath(path), kind, 1, "sum")
+
+
+def assert_uuid_filename(filename: str, suffix: str) -> None:
+    assert filename.endswith(suffix)
+    UUID(filename.removesuffix(suffix))
 
 
 @pytest.mark.asyncio
@@ -106,6 +112,12 @@ async def test_gateway_delivers_clean_media_then_separate_actions(tmp_path) -> N
     assert all(call[2].get("reply_markup") is None for call in bot.calls[:-1])
     assert all(call[2].get("caption") is None for call in bot.calls[:-1])
     assert bot.calls[-1][2]["reply_markup"] is not None
+    uploads = [call[1][1] for call in bot.calls[:-1]]
+    assert_uuid_filename(uploads[0].filename, ".jpg")
+    assert uploads[1].filename == "file.mp3"
+    assert_uuid_filename(uploads[2].filename, ".mp4")
+    assert_uuid_filename(uploads[3].filename, ".bin")
+    assert [upload.path for upload in uploads] == paths
 
     bot.calls.clear()
     await gateway.deliver(
@@ -155,6 +167,35 @@ async def test_gateway_sends_audio_collections_in_maximum_sized_media_groups(
     ]
     assert source_buttons[0].url == job.source_url
     assert groups[1][2]["media"][0].caption is None
+    assert [
+        item.media.filename for group in groups for item in group[2]["media"]
+    ] == [f"track-{index}.mp3" for index in range(12)]
+
+
+@pytest.mark.asyncio
+async def test_gateway_uses_uuid_filenames_for_non_audio_media_groups(tmp_path) -> None:
+    photo = tmp_path / "source-title.jpg"
+    video = tmp_path / "source-title.mp4"
+    photo.write_bytes(b"photo")
+    video.write_bytes(b"video")
+    artifacts = (
+        artifact(photo, MediaKind.PHOTO),
+        artifact(video, MediaKind.VIDEO),
+    )
+    bot = Bot()
+
+    await AiogramTelegramGateway(bot).deliver(
+        Job("album", 1, 2, "https://example.com/post", "key"),
+        artifacts,
+        UserPreferences(show_buttons=False),
+    )
+
+    media = bot.calls[0][2]["media"]
+    assert bot.calls[0][0] == "send_media_group"
+    assert_uuid_filename(media[0].media.filename, ".jpg")
+    assert_uuid_filename(media[1].media.filename, ".mp4")
+    assert media[0].media.path == photo
+    assert media[1].media.path == video
 
 
 @pytest.mark.asyncio

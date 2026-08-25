@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+from uuid import uuid4
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -218,7 +219,7 @@ class AiogramTelegramGateway:
         preferences: UserPreferences,
     ) -> None:
         for artifact in artifacts:
-            file = FSInputFile(Path(artifact.path))
+            file = _upload_file(artifact)
             if preferences.document_mode or artifact.kind is MediaKind.DOCUMENT:
                 await self._bot.send_document(
                     job.chat_id,
@@ -394,7 +395,7 @@ def _chunks(
 
 
 def _input_media(artifact: DownloadArtifact, preferences: UserPreferences):
-    file = FSInputFile(Path(artifact.path))
+    file = _upload_file(artifact)
     if preferences.document_mode or artifact.kind is MediaKind.DOCUMENT:
         return InputMediaDocument(media=file)
     if artifact.kind is MediaKind.PHOTO:
@@ -412,6 +413,13 @@ def _input_media(artifact: DownloadArtifact, preferences: UserPreferences):
         supports_streaming=True,
         thumbnail=_thumbnail_file(artifact),
     )
+
+
+def _upload_file(artifact: DownloadArtifact) -> FSInputFile:
+    path = Path(artifact.path)
+    if artifact.kind is MediaKind.AUDIO:
+        return FSInputFile(path)
+    return FSInputFile(path, filename=f"{uuid4()}{path.suffix}")
 
 
 def _duration_seconds(duration_ms: int | None) -> int | None:

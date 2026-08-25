@@ -17,7 +17,8 @@ RUN python -m venv "$VIRTUAL_ENV"
 
 COPY requirements.txt /tmp/requirements.txt
 
-RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.txt \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --disable-pip-version-check -r /tmp/requirements.txt \
     && rm -rf "$VIRTUAL_ENV"/lib/python*/site-packages/pip* \
     && find "$VIRTUAL_ENV" -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
@@ -39,11 +40,13 @@ COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=spotify-builder /build/tools/spotify-streamer/target/release/spotify-streamer /usr/local/bin/spotify-streamer
-COPY --chown=appuser:appgroup . .
 
 RUN chown appuser:appgroup /app \
-    && install -d -o appuser -g appgroup /app/downloads /app/logs /app/cookies /app/spotify \
-    && python scripts/docker_media_smoke.py
+    && python -c "from importlib.metadata import version; import aiogram, asyncpg, curl_cffi, httpx, psycopg2, redis, sqlalchemy, yt_dlp, yt_dlp_ejs; version('bgutil-ytdlp-pot-provider')" \
+    && ffmpeg -version >/dev/null \
+    && ffprobe -version >/dev/null \
+    && deno eval "if (1 + 1 !== 2) Deno.exit(1)" \
+    && spotify-streamer --version
 
-ENTRYPOINT ["python", "container_entrypoint.py"]
-CMD ["python", "main.py"]
+ENTRYPOINT ["python", "/app/container_entrypoint.py"]
+CMD ["python", "-m", "downloader_bot", "bot"]

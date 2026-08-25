@@ -19,6 +19,7 @@ from downloader_bot.application.use_cases import (
     GetStats,
     GetUserJobs,
     ManageSettings,
+    PlanSubmission,
     ProcessDownload,
     ProcessInline,
     PublishOutbox,
@@ -368,6 +369,61 @@ async def test_batch_creates_parent_and_children_with_snapshot() -> None:
     assert parent.children_total == 2
     assert all(child.parent_id == parent.id and child.audio_only for child in children)
     assert all(child.preferences.quality == "720" for child in children)
+
+
+@pytest.mark.asyncio
+async def test_natural_submission_plan_and_per_url_batch_modes() -> None:
+    class NaturalRegistry:
+        def detect(self, url):
+            if "spotify" in url:
+                return SimpleAdapter(Platform.SPOTIFY)
+            if "instagram" in url:
+                return SimpleAdapter(Platform.INSTAGRAM)
+            return SimpleAdapter(Platform.YOUTUBE)
+
+    urls = (
+        "https://open.spotify.com/track/x",
+        "https://instagram.com/p/x",
+        "https://youtube.com/watch?v=x",
+    )
+    settings = Settings(UserPreferences(youtube_mode="audio"))
+    plan = await PlanSubmission(settings, NaturalRegistry()).execute(1, urls)
+    assert plan.audio_only_by_url == (True, False, True)
+    assert not plan.ask_for_youtube
+
+    jobs, ids = Jobs(), Ids()
+    submit = SubmitDownload(jobs, Users(), ids, Clock(), Analytics(), settings)
+    _, children = await SubmitBatch(submit, jobs, ids, Clock(), settings).execute(
+        user_id=1,
+        chat_id=2,
+        urls=urls,
+        audio_only_by_url=plan.audio_only_by_url,
+    )
+    assert tuple(child.audio_only for child in children) == (True, False, True)
+    with pytest.raises(ValueError, match="batch modes must match URLs"):
+        await SubmitBatch(submit, jobs, ids, Clock(), settings).execute(
+            user_id=1,
+            chat_id=2,
+            urls=urls,
+            audio_only_by_url=(True,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_youtube_ask_plan_only_asks_when_youtube_is_present() -> None:
+    class NaturalRegistry:
+        def detect(self, url):
+            platform = Platform.YOUTUBE if "youtube" in url else Platform.SOUNDCLOUD
+            return SimpleAdapter(platform)
+
+    planner = PlanSubmission(
+        Settings(UserPreferences(youtube_mode="ask")), NaturalRegistry()
+    )
+    youtube = await planner.execute(1, ("https://youtube.com/watch?v=x",))
+    soundcloud = await planner.execute(1, ("https://soundcloud.com/a/b",))
+    assert youtube.ask_for_youtube and youtube.audio_only_by_url == (False,)
+    assert not soundcloud.ask_for_youtube
+    assert soundcloud.audio_only_by_url == (True,)
 
 
 @pytest.mark.asyncio
@@ -727,6 +783,9 @@ async def test_inline_customization_settings_stats_and_outbox_use_cases() -> Non
     manager = ManageSettings(settings)
     assert (await manager.update(1, quality="480")).quality == "480"
     assert (await manager.get(1)).quality == "480"
+    assert (await manager.update(1, youtube_mode="ask")).youtube_mode == "ask"
+    with pytest.raises(ValueError, match="invalid YouTube mode"):
+        await manager.update(1, youtube_mode="sometimes")
     with pytest.raises(ValueError, match="unknown settings"):
         await manager.update(1, invalid=True)
 

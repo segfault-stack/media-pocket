@@ -10,9 +10,10 @@ from downloader_bot.adapters.telegram import access as access_module
 from downloader_bot.adapters.telegram.access import InviteAccessMiddleware, _invite_code
 from downloader_bot.adapters.telegram.presenter import (
     admin_invite_result_keyboard,
+    admin_invites_keyboard,
     render_active_invites,
 )
-from downloader_bot.adapters.telegram.router import build_router
+from downloader_bot.adapters.telegram.router import AdminInviteForm, build_router
 from downloader_bot.domain import InviteCode, InviteKind, InviteRedemption
 
 
@@ -77,8 +78,19 @@ class Generate:
             expires_at=now + kwargs["valid_for"]
             if kind is InviteKind.TIMED
             else None,
-            max_uses=1 if kind is InviteKind.ONE_TIME else None,
+            max_uses=1 if kind is InviteKind.ONE_TIME else kwargs.get("max_uses"),
         )
+
+
+class FakeState:
+    def __init__(self) -> None:
+        self.value = None
+
+    async def set_state(self, value) -> None:
+        self.value = value
+
+    async def clear(self) -> None:
+        self.value = None
 
 
 class InviteList:
@@ -109,6 +121,14 @@ class GenericStub:
 def _handler(router, observer: str, name: str):
     return next(
         item.callback
+        for item in router.observers[observer].handlers
+        if item.callback.__name__ == name
+    )
+
+
+def _handler_object(router, observer: str, name: str):
+    return next(
+        item
         for item in router.observers[observer].handlers
         if item.callback.__name__ == name
     )
@@ -242,6 +262,91 @@ def test_invite_input_and_copy_button_are_short_and_explicit() -> None:
     button = admin_invite_result_keyboard("JOIN2345").inline_keyboard[0][0]
     assert button.text == "📋 Copy code"
     assert button.copy_text and button.copy_text.text == "JOIN2345"
+    labels = [
+        button.text
+        for row in admin_invites_keyboard().inline_keyboard
+        for button in row
+    ]
+    assert "🔢 Limited uses" in labels
+
+
+@pytest.mark.asyncio
+async def test_admin_router_creates_limited_invite_from_per_user_state(
+    monkeypatch,
+) -> None:
+    from downloader_bot.adapters.telegram import router as router_module
+
+    monkeypatch.setattr(router_module, "Message", FakeMessage)
+    generate = Generate()
+    _root, admin = _admin_router(AccessControl(True), generate)
+    prompt = FakeMessage("/admin")
+    prompt.edit_text = AsyncMock()
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        data="adm:new:limited",
+        message=prompt,
+        answer=AsyncMock(),
+    )
+    state = FakeState()
+
+    await _handler(admin, "callback_query", "admin_request_limited_invite")(
+        query, state
+    )
+    assert state.value == AdminInviteForm.waiting_for_max_uses
+    assert "2 to 100000" in prompt.edit_text.await_args.args[0]
+
+    invalid = FakeMessage("1.5")
+    await _handler(admin, "message", "admin_create_limited_invite")(
+        invalid, state
+    )
+    assert "whole number" in invalid.answer.await_args.args[0]
+    assert state.value == AdminInviteForm.waiting_for_max_uses
+    assert generate.calls == []
+
+    amount = FakeMessage("25")
+    await _handler(admin, "message", "admin_create_limited_invite")(
+        amount, state
+    )
+    assert generate.calls == [(42, InviteKind.LIMITED, {"max_uses": 25})]
+    assert state.value is None
+    result_markup = amount.answer.await_args.kwargs["reply_markup"]
+    assert result_markup.inline_keyboard[0][0].copy_text.text == "JOIN2345"
+    assert "25 uses" in amount.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_admin_can_cancel_limited_invite_prompt(monkeypatch) -> None:
+    from downloader_bot.adapters.telegram import router as router_module
+
+    monkeypatch.setattr(router_module, "Message", FakeMessage)
+    _root, admin = _admin_router(AccessControl(True), Generate())
+    state = FakeState()
+    await state.set_state(AdminInviteForm.waiting_for_max_uses)
+    message = FakeMessage("/cancel")
+
+    await _handler(admin, "message", "admin_create_limited_invite")(
+        message, state
+    )
+
+    assert state.value is None
+    assert "Invite access" in message.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_limited_invite_state_bypasses_ordinary_link_handler() -> None:
+    root, admin = _admin_router(AccessControl(True), Generate())
+    message = FakeMessage("25")
+    raw_state = AdminInviteForm.waiting_for_max_uses.state
+
+    root_match, _ = await _handler_object(root, "message", "links").check(
+        message, raw_state=raw_state
+    )
+    admin_match, _ = await _handler_object(
+        admin, "message", "admin_create_limited_invite"
+    ).check(message, raw_state=raw_state)
+
+    assert not root_match
+    assert admin_match
 
 
 @pytest.mark.asyncio
@@ -299,3 +404,7 @@ def test_active_invite_presenter_handles_empty_and_one_use() -> None:
     )
     assert "No active invites" in render_active_invites(())
     assert "0/1 used" in render_active_invites((once,))
+    limited = InviteCode(
+        "LIMIT234", InviteKind.LIMITED, 42, now, max_uses=25, use_count=7
+    )
+    assert "7/25 used · no expiry" in render_active_invites((limited,))

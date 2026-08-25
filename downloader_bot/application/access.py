@@ -9,6 +9,8 @@ from downloader_bot.domain import InviteCode, InviteKind, InviteRedemption
 from .ports import AccessRepository, Clock
 
 INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+MIN_LIMITED_INVITE_USES = 2
+MAX_LIMITED_INVITE_USES = 100_000
 
 
 def generate_invite_code(length: int = 8) -> str:
@@ -42,14 +44,25 @@ class GenerateInvite:
         kind: InviteKind,
         *,
         valid_for: timedelta | None = None,
+        max_uses: int | None = None,
     ) -> InviteCode:
         if not await self._access.is_admin(admin_id):
             raise PermissionError("administrator access required")
         if kind is InviteKind.TIMED:
-            if valid_for is None or valid_for <= timedelta(0):
+            if valid_for is None or valid_for <= timedelta(0) or max_uses is not None:
                 raise ValueError("timed invites require a positive lifetime")
-        elif valid_for is not None:
+        elif kind is InviteKind.ONE_TIME and (
+            valid_for is not None or max_uses is not None
+        ):
             raise ValueError("one-time invites do not accept a lifetime")
+        elif kind is InviteKind.LIMITED and (
+            valid_for is not None
+            or max_uses is None
+            or not MIN_LIMITED_INVITE_USES
+            <= max_uses
+            <= MAX_LIMITED_INVITE_USES
+        ):
+            raise ValueError("limited invite use count must be between 2 and 100000")
 
         now = self._clock.now()
         for _ in range(10):
@@ -62,7 +75,7 @@ class GenerateInvite:
                 expires_at=now + valid_for
                 if kind is InviteKind.TIMED and valid_for is not None
                 else None,
-                max_uses=1 if kind is InviteKind.ONE_TIME else None,
+                max_uses=1 if kind is InviteKind.ONE_TIME else max_uses,
             )
             if await self._access.create_invite(invite):
                 return invite

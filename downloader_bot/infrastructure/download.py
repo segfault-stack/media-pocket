@@ -687,21 +687,37 @@ async def _terminate(*processes: asyncio.subprocess.Process) -> None:
 async def _transcode_video(target: Path, cancellation) -> Path:
     output = target.with_name(f"{target.stem}.converted.mp4")
     final = target.with_suffix(".mp4")
+    stream_copy = await _is_telegram_compatible_video(target)
+    codec_args = (
+        ("-codec", "copy")
+        if stream_copy
+        else (
+            "-codec:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "2",
+            "-crf",
+            "23",
+            "-codec:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+        )
+    )
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
         "-i",
         str(target),
-        "-codec:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "23",
-        "-codec:a",
-        "aac",
-        "-profile:a",
-        "aac_low",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        *codec_args,
         "-movflags",
         "+faststart",
         str(output),
@@ -734,3 +750,53 @@ async def _transcode_video(target: Path, cancellation) -> Path:
     target.unlink(missing_ok=True)
     output.replace(final)
     return final
+
+
+async def _is_telegram_compatible_video(target: Path) -> bool:
+    """Return whether an MP4 can be prepared with a metadata-only remux."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name:stream=codec_type,codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(target),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode:
+            return False
+        probe = json.loads(stdout)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+
+    formats = set(str(probe.get("format", {}).get("format_name", "")).split(","))
+    streams = probe.get("streams")
+    if not isinstance(streams, list):
+        return False
+    video_codecs = {
+        stream.get("codec_name")
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "video"
+    }
+    audio_codecs = {
+        stream.get("codec_name")
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "audio"
+    }
+    video_pixel_formats = {
+        stream.get("pix_fmt")
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "video"
+    }
+    return (
+        bool(formats & {"mp4", "mov"})
+        and video_codecs == {"h264"}
+        and video_pixel_formats <= {"yuv420p", "yuvj420p"}
+        and bool(video_pixel_formats)
+        and (not audio_codecs or audio_codecs == {"aac"})
+    )

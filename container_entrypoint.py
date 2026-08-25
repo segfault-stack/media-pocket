@@ -8,7 +8,7 @@ from pathlib import Path
 DEFAULT_COMMAND = ["python", "main.py"]
 MANAGED_PATHS = ("/app/downloads", "/app/logs", "/app/cookies")
 DEFAULT_YOUTUBE_COOKIES_FILE = Path("/app/cookies/youtube.txt")
-RUNTIME_YOUTUBE_COOKIES_FILE = Path("/app/.runtime/cookies/youtube.txt")
+RUNTIME_YOUTUBE_COOKIES_FILE = Path("/tmp/media-pocket/cookies/youtube.txt")
 
 
 def _resolve_command(argv: list[str]) -> list[str]:

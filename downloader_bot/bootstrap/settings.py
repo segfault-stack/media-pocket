@@ -16,6 +16,7 @@ class Settings:
     telegram_api_url: str = "https://api.telegram.org"
     cookies_file: str | None = None
     youtube_cookies_file: str | None = None
+    youtube_pot_provider_url: str | None = None
     tiktok_cookies_file: str | None = None
     instagram_cookies_file: str | None = None
     x_cookies_file: str | None = None
@@ -70,6 +71,7 @@ class Settings:
             cookies_file=cookies_file,
             youtube_cookies_file=values.get("YTDLP_YOUTUBE_COOKIES_FILE")
             or cookies_file,
+            youtube_pot_provider_url=values.get("YOUTUBE_POT_PROVIDER_URL") or None,
             tiktok_cookies_file=values.get("YTDLP_TIKTOK_COOKIES_FILE") or cookies_file,
             instagram_cookies_file=values.get("YTDLP_INSTAGRAM_COOKIES_FILE")
             or cookies_file,

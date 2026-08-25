@@ -8,6 +8,7 @@ from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMa
 from downloader_bot.domain import (
     DeliveryMode,
     ErrorCode,
+    InviteKind,
     Job,
     JobStage,
     Platform,
@@ -116,7 +117,7 @@ INLINE_ACCESS_MESSAGE = "Open the bot in private chat to unlock downloads."
 INLINE_ACCESS_BUTTON = "🔓 Enter invite code"
 ADMIN_HOME_TEXT = (
     "<b>🛠 Invite access</b>\n\n"
-    "Create a single-use code, or a timed code that can be shared until it expires."
+    "Create a single-use, limited-use, or timed invite code."
 )
 ADMIN_INVITE_CREATED_TEXT = (
     "<b>🎫 Invite created</b>\n\n"
@@ -125,7 +126,16 @@ ADMIN_INVITE_CREATED_TEXT = (
     "Tap the code to copy it."
 )
 ADMIN_ONE_USE_DETAILS = "One use · no expiry"
+ADMIN_LIMITED_DETAILS = "Up to {max_uses} uses · no expiry"
 ADMIN_TIMED_DETAILS = "Valid for {duration} · multiple users"
+ADMIN_LIMITED_PROMPT_TEXT = (
+    "<b>🔢 Limited-use invite</b>\n\n"
+    "Send the maximum number of uses as a whole number from 2 to 100000.\n"
+    "Send <code>/cancel</code> to stop."
+)
+ADMIN_LIMITED_INVALID_TEXT = (
+    "Enter a whole number from 2 to 100000, or send <code>/cancel</code>."
+)
 ADMIN_INVITES_EMPTY_TEXT = "<b>🎫 Active invites</b>\n\nNo active invites."
 ADMIN_INVITES_TEXT = "<b>🎫 Active invites</b>\n\n{items}"
 ADMIN_INVITE_REVOKED_TOAST = "Invite revoked"
@@ -152,6 +162,11 @@ def admin_invites_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🎫 One use", callback_data="adm:new:once")],
             [
+                InlineKeyboardButton(
+                    text="🔢 Limited uses", callback_data="adm:new:limited"
+                )
+            ],
+            [
                 InlineKeyboardButton(text="⏱ 24 hours", callback_data="adm:new:24h"),
                 InlineKeyboardButton(text="📅 7 days", callback_data="adm:new:7d"),
             ],
@@ -159,6 +174,14 @@ def admin_invites_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🗓 30 days", callback_data="adm:new:30d"),
                 InlineKeyboardButton(text="📋 Active invites", callback_data="adm:list"),
             ],
+        ]
+    )
+
+
+def admin_limited_invite_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✖ Cancel", callback_data="adm:limited:cancel")]
         ]
     )
 
@@ -199,8 +222,10 @@ def render_active_invites(invites) -> str:
         return ADMIN_INVITES_EMPTY_TEXT
     items: list[str] = []
     for invite in invites:
-        if invite.expires_at is None:
+        if invite.kind is InviteKind.ONE_TIME:
             details = f"one use · {invite.use_count}/1 used"
+        elif invite.kind is InviteKind.LIMITED:
+            details = f"{invite.use_count}/{invite.max_uses} used · no expiry"
         else:
             details = f"until {invite.expires_at:%Y-%m-%d %H:%M} UTC"
         items.append(f"<code>{escape(invite.code)}</code> · {details}")
@@ -519,7 +544,7 @@ def status_keyboard(jobs: tuple[Job, ...]) -> InlineKeyboardMarkup | None:
 def settings_home_text(value: UserPreferences) -> str:
     return (
         "<b>⚙️ Settings</b>\nChoose a category. Changes are saved immediately.\n\n"
-        f"Default: {'Audio' if value.default_audio_only else 'Video/Media'} · "
+        f"YouTube: {_youtube_mode_name(value.youtube_mode)} · "
         f"{_quality_name(value.quality)} · {'File' if value.document_mode else 'Media'}"
     )
 
@@ -550,14 +575,19 @@ def settings_page(
     value: UserPreferences, page: str
 ) -> tuple[str, InlineKeyboardMarkup]:
     if page == "download":
-        text = f"<b>🎬 Download & Quality</b>\nDefaults used when a format picker opens.\n\nMode: {'Audio' if value.default_audio_only else 'Video/Media'}\nVideo quality: {_quality_name(value.quality)}"
+        text = (
+            "<b>🎬 Download & Quality</b>\n"
+            "YouTube links start immediately unless Always ask is selected. "
+            "Audio-first services keep their natural audio mode.\n\n"
+            f"YouTube: {_youtube_mode_name(value.youtube_mode)}\n"
+            f"Video quality: {_quality_name(value.quality)}"
+        )
         rows = [
             [
-                _setting(
-                    "🎬 Video/Media", "default_audio_only", not value.default_audio_only
-                ),
-                _setting("🎧 Audio", "default_audio_only", value.default_audio_only),
+                _youtube_setting("🎬 Video", "video", value.youtube_mode == "video"),
+                _youtube_setting("🎧 Audio", "audio", value.youtube_mode == "audio"),
             ],
+            [_youtube_setting("💬 Always ask", "ask", value.youtube_mode == "ask")],
             [
                 _quality_setting(item, value.quality == item)
                 for item in ("best", "1080", "720", "480")
@@ -612,6 +642,19 @@ def _quality_setting(value: str, selected: bool) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=("✓ " if selected else "") + _quality_name(value),
         callback_data=f"settings:quality:{value}",
+    )
+
+
+def _youtube_setting(label: str, value: str, selected: bool) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=("✓ " if selected else "") + label,
+        callback_data=f"settings:youtube:{value}",
+    )
+
+
+def _youtube_mode_name(value: str) -> str:
+    return {"video": "Video", "audio": "Audio", "ask": "Always ask"}.get(
+        value, "Video"
     )
 
 

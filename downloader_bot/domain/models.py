@@ -87,6 +87,7 @@ class DeliveryMode(StrEnum):
 class InviteKind(StrEnum):
     TIMED = "timed"
     ONE_TIME = "one_time"
+    LIMITED = "limited"
 
 
 class InviteRedemption(StrEnum):
@@ -194,6 +195,7 @@ class UserPreferences:
     delete_source: bool = True
     default_audio_only: bool = False
     compact_progress: bool = False
+    youtube_mode: str = "video"
 
     def cache_variant(self, *, audio_only: bool = False) -> str:
         return ":".join(
@@ -312,8 +314,18 @@ class InviteCode:
         if self.kind is InviteKind.TIMED:
             if self.expires_at is None or self.max_uses is not None:
                 raise ValueError("timed invites require expiry and have no use limit")
-        elif self.expires_at is not None or self.max_uses != 1:
+        elif self.kind is InviteKind.ONE_TIME and (
+            self.expires_at is not None or self.max_uses != 1
+        ):
             raise ValueError("one-time invites require max_uses=1 and no expiry")
+        elif self.kind is InviteKind.LIMITED and (
+            self.expires_at is not None
+            or self.max_uses is None
+            or not 2 <= self.max_uses <= 100_000
+        ):
+            raise ValueError(
+                "limited invites require max_uses between 2 and 100000 and no expiry"
+            )
 
     def available_at(self, now: datetime) -> bool:
         return (

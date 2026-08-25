@@ -53,6 +53,38 @@ class SubmitDownloadCommand:
     inline_message_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SubmissionPlan:
+    audio_only_by_url: tuple[bool, ...]
+    ask_for_youtube: bool = False
+
+
+class PlanSubmission:
+    """Choose immediate provider-native modes without creating persistent state."""
+
+    def __init__(
+        self, settings: SettingsRepository, registry: PlatformRegistry
+    ) -> None:
+        self._settings = settings
+        self._registry = registry
+
+    async def execute(
+        self, user_id: int, urls: tuple[str, ...]
+    ) -> SubmissionPlan:
+        preferences = await self._settings.get(user_id)
+        youtube_mode = _youtube_mode(preferences)
+        platforms = tuple(self._registry.detect(_validated_url(url)).platform for url in urls)
+        return SubmissionPlan(
+            audio_only_by_url=tuple(
+                platform.value in _AUDIO_PLATFORMS
+                or (platform.value == "youtube" and youtube_mode == "audio")
+                for platform in platforms
+            ),
+            ask_for_youtube=youtube_mode == "ask"
+            and any(platform.value == "youtube" for platform in platforms),
+        )
+
+
 class SubmitDownload:
     def __init__(
         self,
@@ -172,12 +204,15 @@ class SubmitBatch:
         source_message_id: int | None = None,
         business_connection_id: str | None = None,
         audio_only: bool = False,
+        audio_only_by_url: tuple[bool, ...] | None = None,
         quality: str | None = None,
         document_mode: bool | None = None,
         status_message_id: int | None = None,
     ) -> tuple[Job, tuple[Job, ...]]:
         if not urls:
             raise ValueError("batch requires at least one URL")
+        if audio_only_by_url is not None and len(audio_only_by_url) != len(urls):
+            raise ValueError("batch modes must match URLs")
         now = self._clock.now()
         parent_id = self._ids.new()
         preferences = await self._settings.get(user_id)
@@ -211,7 +246,9 @@ class SubmitBatch:
                     parent_id=parent.id,
                     source_message_id=source_message_id,
                     business_connection_id=business_connection_id,
-                    audio_only=audio_only,
+                    audio_only=audio_only_by_url[index]
+                    if audio_only_by_url is not None
+                    else audio_only,
                     quality=quality,
                     document_mode=document_mode,
                     status_message_id=None,
@@ -840,6 +877,15 @@ class ManageSettings:
         allowed = set(UserPreferences.__dataclass_fields__)
         if unknown := set(changes) - allowed:
             raise ValueError(f"unknown settings: {', '.join(sorted(unknown))}")
+        if "youtube_mode" in changes:
+            youtube_mode = changes["youtube_mode"]
+            if youtube_mode not in {"video", "audio", "ask"}:
+                raise ValueError("invalid YouTube mode")
+            changes["default_audio_only"] = youtube_mode == "audio"
+        elif "default_audio_only" in changes:
+            changes["youtube_mode"] = (
+                "audio" if changes["default_audio_only"] else "video"
+            )
         return await self._settings.save(
             user_id, replace(current, **cast(Any, changes))
         )
@@ -908,11 +954,17 @@ def _job_percent(stage: JobStage) -> int:
 def _default_mode(platforms, preferences: UserPreferences) -> SelectionMode:
     if all(platform.value in _AUDIO_PLATFORMS for platform in platforms):
         return SelectionMode.AUDIO
-    if preferences.default_audio_only:
+    if _youtube_mode(preferences) == "audio":
         return _allowed_mode(SelectionMode.AUDIO, platforms)
     if any(platform.value in _SOCIAL_MEDIA_PLATFORMS for platform in platforms):
         return SelectionMode.MEDIA
     return SelectionMode.VIDEO
+
+
+def _youtube_mode(preferences: UserPreferences) -> str:
+    if preferences.youtube_mode in {"audio", "ask"}:
+        return preferences.youtube_mode
+    return "audio" if preferences.default_audio_only else "video"
 
 
 def _allowed_mode(requested: SelectionMode, platforms) -> SelectionMode:

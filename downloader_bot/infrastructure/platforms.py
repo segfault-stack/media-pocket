@@ -72,6 +72,7 @@ class YtDlpPlatformAdapter:
     platform: Platform
     cookies_file: str | None = None
     format_selector: str = "best[ext=mp4]/best"
+    youtube_pot_provider_url: str | None = None
 
     async def resolve(
         self, url: str, preferences: UserPreferences, *, audio_only: bool = False
@@ -104,6 +105,18 @@ class YtDlpPlatformAdapter:
             ]
             if cookie_file:
                 command.extend(("--cookies", cookie_file))
+            if self.platform in {Platform.YOUTUBE, Platform.SPOTIFY}:
+                command.extend(("--extractor-args", "youtube:player_client=mweb"))
+            if (
+                self.platform in {Platform.YOUTUBE, Platform.SPOTIFY}
+                and self.youtube_pot_provider_url
+            ):
+                command.extend(
+                    (
+                        "--extractor-args",
+                        f"youtubepot-bgutilhttp:base_url={self.youtube_pot_provider_url}",
+                    )
+                )
             command.append(target)
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -642,11 +655,14 @@ class DefaultPlatformRegistry:
         spotify_command: str | None = None,
         spotify_cache_dir: str = "spotify",
         spotify_resolve_timeout_seconds: int = 120,
+        youtube_pot_provider_url: str | None = None,
     ) -> None:
         provider_cookies = cookies_files or {}
         self._adapters: dict[Platform, PlatformAdapter] = {
             platform: YtDlpPlatformAdapter(
-                platform, provider_cookies.get(platform) or cookies_file
+                platform,
+                provider_cookies.get(platform) or cookies_file,
+                youtube_pot_provider_url=youtube_pot_provider_url,
             )
             for platform in Platform
         }
@@ -662,6 +678,7 @@ class DefaultPlatformRegistry:
             command=spotify_command,
             cache_dir=spotify_cache_dir,
             resolve_timeout_seconds=spotify_resolve_timeout_seconds,
+            youtube_pot_provider_url=youtube_pot_provider_url,
         )
         if client:
             self._adapters[Platform.HITMOZ] = HitMozPlatformAdapter(

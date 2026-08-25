@@ -24,6 +24,7 @@ from downloader_bot.application.use_cases import (
     GetStats,
     GetUserJobs,
     ManageSettings,
+    PlanSubmission,
     ProcessDownload,
     PublishOutbox,
     RefreshParent,
@@ -82,6 +83,7 @@ class Container:
     cleanup_artifacts: CleanupArtifacts
     process: ProcessDownload
     manage_settings: ManageSettings
+    plan_submission: PlanSubmission
     publish_outbox: PublishOutbox
     get_stats: GetStats
     check_access: CheckAccess
@@ -124,6 +126,7 @@ async def build_container(settings: Settings) -> Container:
             Platform.INSTAGRAM: settings.instagram_cookies_file,
             Platform.X: settings.x_cookies_file,
         },
+        youtube_pot_provider_url=settings.youtube_pot_provider_url,
         client=http,
         spotify_client_id=settings.spotify_client_id,
         spotify_client_secret=settings.spotify_client_secret,
@@ -184,6 +187,7 @@ async def build_container(settings: Settings) -> Container:
             cache,
         ),
         manage_settings=ManageSettings(preferences),
+        plan_submission=PlanSubmission(preferences, registry),
         publish_outbox=PublishOutbox(jobs, queue),
         get_stats=GetStats(analytics),
         check_access=CheckAccess(access),

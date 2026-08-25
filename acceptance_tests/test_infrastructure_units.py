@@ -39,6 +39,7 @@ from downloader_bot.infrastructure.database import (
 from downloader_bot.infrastructure.download import (
     HttpDownloadEngine,
     _download_headers,
+    _is_telegram_compatible_video,
     _suffix,
     _total_size,
     _transcode_audio,
@@ -367,7 +368,13 @@ async def test_http_engine_uses_ffmpeg_for_hls_playlists(monkeypatch, tmp_path) 
         Path(args[-1]).write_bytes(b"video")
         return Process()
 
+    async def keep_video(target, _cancellation):
+        return target
+
     monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._transcode_video", keep_video
+    )
     post = MediaPost(
         "https://youtube.com/watch?v=x",
         Platform.YOUTUBE,
@@ -481,17 +488,40 @@ async def test_audio_transcode_subprocess_success_failure_and_cancel(
 
 
 @pytest.mark.asyncio
-async def test_video_transcode_outputs_h264_aac_mp4(monkeypatch, tmp_path) -> None:
+async def test_video_transcode_limits_cpu_for_incompatible_media(
+    monkeypatch, tmp_path
+) -> None:
     source = tmp_path / "source.webm"
     source.write_bytes(b"video")
-    command: tuple[object, ...] = ()
+    commands: list[tuple[object, ...]] = []
 
-    class Process:
+    class ProbeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (
+                json.dumps(
+                    {
+                        "format": {"format_name": "matroska,webm"},
+                        "streams": [
+                            {
+                                "codec_type": "video",
+                                "codec_name": "vp9",
+                                "pix_fmt": "yuv420p",
+                            },
+                            {"codec_type": "audio", "codec_name": "opus"},
+                        ],
+                    }
+                ).encode(),
+                b"",
+            )
+
+    class FfmpegProcess:
         returncode = None
         stderr = None
 
         async def wait(self):
-            Path(command[-1]).write_bytes(b"converted")
+            Path(commands[-1][-1]).write_bytes(b"converted")
             self.returncode = 0
             return self.returncode
 
@@ -499,14 +529,102 @@ async def test_video_transcode_outputs_h264_aac_mp4(monkeypatch, tmp_path) -> No
             self.returncode = -15
 
     async def create(*args, **_kwargs):
-        nonlocal command
-        command = args
-        return Process()
+        commands.append(args)
+        return ProbeProcess() if args[0] == "ffprobe" else FfmpegProcess()
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", create)
     output = await _transcode_video(source, Cancellation())
     assert output.suffix == ".mp4" and output.read_bytes() == b"converted"
-    assert "libx264" in command and "aac_low" in command
+    ffmpeg_command = commands[-1]
+    assert "libx264" in ffmpeg_command and "aac_low" in ffmpeg_command
+    assert ffmpeg_command[ffmpeg_command.index("-preset") + 1] == "veryfast"
+    assert ffmpeg_command[ffmpeg_command.index("-pix_fmt") + 1] == "yuv420p"
+    assert ffmpeg_command[ffmpeg_command.index("-threads") + 1] == "2"
+
+
+@pytest.mark.asyncio
+async def test_video_transcode_stream_copies_compatible_mp4(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    commands: list[tuple[object, ...]] = []
+
+    class ProbeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (
+                json.dumps(
+                    {
+                        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                        "streams": [
+                            {
+                                "codec_type": "video",
+                                "codec_name": "h264",
+                                "pix_fmt": "yuv420p",
+                            },
+                            {"codec_type": "audio", "codec_name": "aac"},
+                        ],
+                    }
+                ).encode(),
+                b"",
+            )
+
+    class FfmpegProcess:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            Path(commands[-1][-1]).write_bytes(b"remuxed")
+            self.returncode = 0
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+    async def create(*args, **_kwargs):
+        commands.append(args)
+        return ProbeProcess() if args[0] == "ffprobe" else FfmpegProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    output = await _transcode_video(source, Cancellation())
+
+    assert output.read_bytes() == b"remuxed"
+    ffmpeg_command = commands[-1]
+    assert ffmpeg_command[ffmpeg_command.index("-codec") + 1] == "copy"
+    assert "libx264" not in ffmpeg_command
+    assert "+faststart" in ffmpeg_command
+
+
+@pytest.mark.asyncio
+async def test_video_transcode_rejects_non_streaming_pixel_format(
+    monkeypatch, tmp_path
+) -> None:
+    class ProbeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (
+                json.dumps(
+                    {
+                        "format": {"format_name": "mov,mp4"},
+                        "streams": [
+                            {
+                                "codec_type": "video",
+                                "codec_name": "h264",
+                                "pix_fmt": "yuv444p",
+                            },
+                            {"codec_type": "audio", "codec_name": "aac"},
+                        ],
+                    }
+                ).encode(),
+                b"",
+            )
+
+    async def create(*_args, **_kwargs):
+        return ProbeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    assert not await _is_telegram_compatible_video(tmp_path / "source.mp4")
 
 
 def test_database_mapping_round_trip_and_schema() -> None:
@@ -549,11 +667,18 @@ def test_database_mapping_round_trip_and_schema() -> None:
             delete_source=True,
             default_audio_only=False,
             compact_progress=True,
+            youtube_mode="ask",
         )
     )
     assert _decode_preferences(json.dumps({"quality": "720", "unknown": 1})) .quality == "720"
     assert preferences.document_mode
     assert preferences.compact_progress
+    assert preferences.youtube_mode == "ask"
+    ask_preferences = _preferences(
+        PreferencesRow(user_id=2, audio_format="opus", youtube_mode="ask")
+    )
+    assert ask_preferences.youtube_mode == "ask"
+    assert ask_preferences.audio_format == "opus"
     now = datetime.now(UTC)
     selection = SelectionRequest(
         token="selection",
