@@ -38,29 +38,7 @@ The bot is deliberately not open to everyone. An administrator creates short inv
 
 ## Bot and worker, separated
 
-```mermaid
-flowchart LR
-    telegram["Telegram<br/>user or group"]
-
-    subgraph server["Your server"]
-        bot["Bot<br/>access, menus, delivery"]
-        postgres[("PostgreSQL<br/>users and jobs")]
-        redis[("Redis Streams<br/>queue and progress")]
-        worker["Worker<br/>extract, download, normalize"]
-        artifacts[("Shared artifacts")]
-
-        bot -->|save job| postgres
-        bot -->|enqueue| redis
-        redis -->|claim job| worker
-        worker -->|publish progress| redis
-        worker -->|write media| artifacts
-        redis -->|update status| bot
-        artifacts -->|deliver result| bot
-    end
-
-    telegram -->|link or batch| bot
-    bot -->|file or media group| telegram
-```
+> **Telegram → Bot → Redis queue → Worker → Shared artifacts → Bot → Telegram**
 
 Only the bot process holds a Telegram client. Workers resolve and download media, report structured progress through Redis, and leave delivery to the bot.
 
