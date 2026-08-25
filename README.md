@@ -1,8 +1,12 @@
 <div align="center">
 
+# Media Pocket
+
 <img src="docs/media-pocket-hero.png" alt="Media Pocket — Send a link. Get clean media back." width="100%">
 
 **An invite-only, self-hosted Telegram downloader for video, audio, social posts, albums, playlists, and batches.**
+
+**Status:** early `0.1.x` self-hosted releases; provider compatibility can change with upstream services.
 
 [![CI](https://github.com/segfault-stack/media-pocket/actions/workflows/ci.yml/badge.svg)](https://github.com/segfault-stack/media-pocket/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/segfault-stack/media-pocket)](LICENCE)
@@ -80,7 +84,8 @@ If the bot should receive ordinary links in groups without being mentioned, adju
 ### 2. Configure the host
 
 ```bash
-git clone --recurse-submodules https://github.com/segfault-stack/media-pocket.git
+git clone --recurse-submodules --branch v0.1.0 \
+  https://github.com/segfault-stack/media-pocket.git
 cd media-pocket
 
 cp .env.example .env
@@ -195,9 +200,9 @@ yt-dlp can read a combined Netscape cookie jar or provider-specific files from `
 
 The optional `cookie-broker` Compose profile can run a separately configured `cookie-sync` image and write refreshed cookie jars into the shared directory:
 
+Configure `COOKIE_BROKER_IMAGE`, `BROKER_URL`, `BROKER_USERNAME`, and `secrets/cookie-broker-password` first, then run:
+
 ```bash
-# Configure COOKIE_BROKER_IMAGE, BROKER_URL, BROKER_USERNAME,
-# and secrets/cookie-broker-password first.
 sudo chown -R 1000:1000 cookies secrets/cookie-broker-password
 sudo chmod 700 cookies
 sudo chmod 600 secrets/cookie-broker-password
@@ -223,6 +228,8 @@ Media Pocket handles bot tokens, provider sessions, browser cookies, and user-su
 - Rotate a credential immediately if it appears in logs, chat, Git, or an image layer.
 
 The provided `.gitignore` and `.dockerignore` block common credential and artifact paths, but they do not replace operator review. CI runs secret and dependency scans on every push and pull request, plus a weekly vulnerability rescan.
+
+Report vulnerabilities privately through [the security policy](SECURITY.md). Never place credentials, cookies, private URLs, user data, or raw production logs in a public issue.
 
 <details>
 <summary><strong>Runtime configuration</strong></summary>

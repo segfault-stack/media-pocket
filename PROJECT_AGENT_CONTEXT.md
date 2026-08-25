@@ -22,17 +22,17 @@
 ## Publication and support
 
 - Publication boundary: inspectable source, build and self-hosting instructions, safe configuration examples, and local verification. The repository does not promise a hosted instance, compatibility lifetime, contribution program, or response time.
-- Supported versions: no public release has been published; the project manifest currently reports `0.1.0` and `main` is the documented source checkout.
+- Supported versions: the latest `0.1.x` release and `main`; see `SECURITY.md` for the security-support boundary.
 - Contribution and support policy: no formal policy is currently published.
-- Private security reporting route: not currently published or enabled; do not ask reporters to disclose credentials or vulnerabilities in a public issue.
+- Private security reporting route: GitHub private vulnerability reporting as documented in `SECURITY.md`.
 - External actions requiring maintainer authorization: pushes, tags, releases, repository settings, deployments, announcements, issue responses, and third-party submissions.
 
 ## Repository and release process
 
 - Default branch: `main`; no public merge policy is currently documented.
 - Generated and sensitive paths: see `.gitignore`, `.dockerignore`, and `README.md#security`.
-- Version source: `pyproject.toml`; there are currently no repository tags or GitHub releases.
-- Release workflow: not yet defined.
+- Version source: `pyproject.toml` and matching annotated semantic-version tags.
+- Release workflow: run the documented local gates, verify the commit and CI, create an annotated tag matching the manifest version, then publish concise GitHub release notes. Never move a published tag.
 - Artifact integrity policy: dependencies are locked in `uv.lock`; CI actions and security scanner images are pinned. No public runtime image or signed release artifact is promised.
 - Deployment boundary and rollback: deployments are operator-owned external state. Preserve configuration and persistent volumes, back up state before destructive changes or migrations, and roll back to a verified source revision and compatible state.
 
