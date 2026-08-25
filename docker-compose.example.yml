@@ -1,0 +1,129 @@
+x-app: &app
+  image: ${DOWNLOADER_IMAGE:-media-pocket:local}
+  build: .
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql://bot_user:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/downloader_bot
+    REDIS_URL: redis://redis:6379/0
+    ARTIFACT_ROOT: /app/downloads
+    YTDLP_COOKIES_FILE: /app/cookies/cookies.txt
+    YTDLP_YOUTUBE_COOKIES_FILE: /app/cookies/youtube.txt
+    YTDLP_TIKTOK_COOKIES_FILE: /app/cookies/tiktok.txt
+    YTDLP_INSTAGRAM_COOKIES_FILE: /app/cookies/instagram.txt
+    YTDLP_X_COOKIES_FILE: /app/cookies/x.txt
+    SPOTIFY_CACHE_DIR: /app/spotify
+  volumes:
+    - downloader_downloads:/app/downloads
+    - downloader_log:/app/logs
+    - ./cookies:/app/cookies
+    - spotify_cache:/app/spotify
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  bot:
+    <<: *app
+    command: ["python", "-m", "downloader_bot", "bot"]
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "downloader_bot", "worker"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
+    expose:
+      - "8081"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: downloader_bot
+      POSTGRES_USER: bot_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot_user -d downloader_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "downloader_bot", "migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  cookie-sync:
+    profiles: ["cookie-broker"]
+    image: ${COOKIE_BROKER_IMAGE:-replace-with-cookie-broker-image}
+    entrypoint: ["cookie-sync"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BROKER_URL: ${BROKER_URL:-https://example.invalid}
+      BROKER_USERNAME: ${BROKER_USERNAME:-downloader-bot}
+      BROKER_PASSWORD_FILE: /run/secrets/cookie-broker-password
+      COOKIE_SYNC_TARGETS: youtube=/cookies/youtube.txt,tiktok=/cookies/tiktok.txt,instagram=/cookies/instagram.txt,x=/cookies/x.txt
+      COOKIE_SYNC_COMBINED: /cookies/cookies.txt
+      COOKIE_SYNC_INTERVAL: ${COOKIE_SYNC_INTERVAL:-5m}
+    volumes:
+      - ./cookies:/cookies
+    secrets:
+      - cookie-broker-password
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  downloader_downloads:
+  downloader_log:
+  postgres_data:
+  redis_data:
+  telegram_bot_api_data:
+  spotify_cache:
+
+secrets:
+  cookie-broker-password:
+    file: ./secrets/cookie-broker-password

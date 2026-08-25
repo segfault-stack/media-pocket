@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+compose_file="${COMPOSE_FILE:-docker-compose.yml}"
+cache_dir="${SPOTIFY_CACHE_DIR:-/app/spotify}"
+oauth_port="${SPOTIFY_OAUTH_PORT:-0}"
+ssh_user="${SPOTIFY_SSH_USER:-root}"
+ssh_host="${SPOTIFY_SSH_HOST:-YOUR_SERVER_HOST}"
+ssh_port="${SPOTIFY_SSH_PORT:-22}"
+
+die() {
+  printf '%s\n' "spotify: $*" >&2
+  exit 1
+}
+
+free_port() {
+  if [ "$oauth_port" != 0 ]; then
+    printf '%s\n' "$oauth_port"
+    return
+  fi
+  python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+helper() {
+  docker compose -f "$compose_file" run --rm --no-deps \
+    --entrypoint spotify-streamer worker "$@"
+}
+
+case "${1:-}" in
+  auth)
+    port="$(free_port)"
+    printf '%s\n' "Run this on your local computer and keep it open:"
+    printf '%s\n' "ssh -N -L $port:127.0.0.1:$port -p $ssh_port $ssh_user@$ssh_host"
+    printf '%s\n' "Then open the Spotify URL printed below in that local browser."
+    exec docker compose -f "$compose_file" run --rm --no-deps \
+      --publish "127.0.0.1:$port:$port" \
+      --entrypoint spotify-streamer worker \
+      auth --cache "$cache_dir" --oauth-port "$port" \
+      --redirect-host 127.0.0.1 --bind-host 0.0.0.0
+    ;;
+  check)
+    helper credentials-check --cache "$cache_dir"
+    ;;
+  resolve)
+    [ "$#" -eq 2 ] || die "usage: scripts/spotify resolve <spotify-url-or-uri>"
+    helper resolve --cache "$cache_dir" --uri "$2"
+    ;;
+  reset-auth)
+    helper credentials-delete --cache "$cache_dir"
+    ;;
+  *)
+    die "usage: scripts/spotify {auth|check|resolve|reset-auth}"
+    ;;
+esac
