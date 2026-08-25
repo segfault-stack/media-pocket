@@ -75,7 +75,9 @@ class HttpDownloadEngine:
         directory.mkdir(parents=True, exist_ok=True)
         tasks = [
             asyncio.create_task(
-                self._download_asset(post, job, asset, item, directory, progress, cancellation)
+                self._download_asset_with_fallback(
+                    post, job, asset, item, directory, progress, cancellation
+                )
             )
             for item, asset in enumerate(post.assets, 1)
         ]
@@ -86,6 +88,21 @@ class HttpDownloadEngine:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+
+    async def _download_asset_with_fallback(
+        self, post, job: Job, asset, item: int, directory: Path, progress, cancellation
+    ) -> DownloadArtifact:
+        candidates = (asset.source_url, *asset.fallback_urls)
+        for index, source_url in enumerate(candidates):
+            candidate = replace(asset, source_url=source_url, fallback_urls=())
+            try:
+                return await self._download_asset(
+                    post, job, candidate, item, directory, progress, cancellation
+                )
+            except httpx.HTTPError as exc:
+                if index == len(candidates) - 1 or not _can_retry_mirror(exc):
+                    raise
+        raise AssertionError("direct media candidates cannot be empty")
 
     async def _download_asset(
         self, post: MediaPost, job: Job, asset, item: int, directory: Path, progress, cancellation
@@ -777,6 +794,15 @@ def _download_headers(post: MediaPost, media_url: str | None = None) -> dict[str
 def _total_size(response: httpx.Response, resumed: int) -> int | None:
     value = response.headers.get("content-length")
     return resumed + int(value) if value and value.isdigit() else None
+
+
+def _can_retry_mirror(exc: httpx.HTTPError) -> bool:
+    if isinstance(exc, httpx.RequestError):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and (
+        exc.response.status_code in {403, 404, 410, 429, 451}
+        or exc.response.status_code >= 500
+    )
 
 
 def _is_hls_playlist(response: httpx.Response) -> bool:

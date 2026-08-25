@@ -10,8 +10,9 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from http.cookies import SimpleCookie
+from pathlib import Path
 from typing import TypedDict
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -45,7 +46,46 @@ PLATFORM_DOMAINS: dict[Platform, tuple[str, ...]] = {
     Platform.SPOTIFY: ("open.spotify.com",),
     Platform.HITMOZ: (),
     Platform.ZAYCEV: ("zaycev.net",),
+    Platform.TWO_CH: ("2ch.hk", "2ch.su", "2ch.life"),
 }
+
+DIRECT_VIDEO_EXTENSIONS = frozenset(
+    {
+        ".3gp",
+        ".avi",
+        ".flv",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".ogv",
+        ".ts",
+        ".webm",
+        ".wmv",
+    }
+)
+DIRECT_AUDIO_EXTENSIONS = frozenset(
+    {
+        ".aac",
+        ".aiff",
+        ".alac",
+        ".flac",
+        ".m4a",
+        ".mp3",
+        ".oga",
+        ".ogg",
+        ".opus",
+        ".wav",
+        ".wma",
+    }
+)
+_DIRECT_MEDIA_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 _HITMOZ_DOWNLOAD_PATTERN = re.compile(
     r'''href\s*=\s*["'](?P<url>(?:https?:)?//[^"']*?/get/music/[^"']+?\.mp3(?:\?[^"']*)?|/get/music/[^"']+?\.mp3(?:\?[^"']*)?)["']''',
@@ -320,6 +360,75 @@ class YtDlpPlatformAdapter:
             if isinstance(entry.get("thumbnail"), str)
             else None,
             requires_extractor_download=len(requested) > 1,
+        )
+
+
+@dataclass(slots=True)
+class DirectMediaPlatformAdapter:
+    platform: Platform
+
+    async def resolve(
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
+    ) -> MediaPost:
+        del preferences, audio_only, cancellation
+        kind = _direct_media_kind(url)
+        if kind is None:
+            raise DownloadError(ErrorCode.UNSUPPORTED, "Unsupported direct media URL")
+        parsed = urlsplit(url)
+        title = parsed.path.rsplit("/", 1)[-1].rsplit(".", 1)[0] or None
+        asset = MediaAsset(
+            source_url=url,
+            kind=kind,
+            title=title,
+            request_headers=(
+                ("Accept", f"{kind.value}/*,application/octet-stream;q=0.9,*/*;q=0.8"),
+                ("Referer", f"{parsed.scheme}://{parsed.netloc}/"),
+                ("User-Agent", _DIRECT_MEDIA_USER_AGENT),
+            ),
+        )
+        return MediaPost(
+            source_url=url,
+            platform=self.platform,
+            assets=(asset,),
+            title=title,
+        )
+
+
+@dataclass(slots=True)
+class TwoChPlatformAdapter(DirectMediaPlatformAdapter):
+    platform: Platform = Platform.TWO_CH
+
+    async def resolve(
+        self,
+        url: str,
+        preferences: UserPreferences,
+        *,
+        audio_only: bool = False,
+        cancellation: Cancellation | None = None,
+    ) -> MediaPost:
+        if not _is_direct_video_url(url):
+            raise DownloadError(ErrorCode.UNSUPPORTED, "Unsupported 2ch video URL")
+        post = await super().resolve(
+            url,
+            preferences,
+            audio_only=audio_only,
+            cancellation=cancellation,
+        )
+        candidates = _two_ch_media_urls(url)
+        return replace(
+            post,
+            assets=(
+                replace(
+                    post.assets[0],
+                    source_url=candidates[0],
+                    fallback_urls=candidates[1:],
+                ),
+            ),
         )
 
 
@@ -766,6 +875,7 @@ class DefaultPlatformRegistry:
         youtube_pot_provider_url: str | None = None,
     ) -> None:
         provider_cookies = cookies_files or {}
+        self._direct_media = DirectMediaPlatformAdapter(Platform.GENERIC)
         self._adapters: dict[Platform, PlatformAdapter] = {
             platform: YtDlpPlatformAdapter(
                 platform,
@@ -789,6 +899,7 @@ class DefaultPlatformRegistry:
             resolve_timeout_seconds=spotify_resolve_timeout_seconds,
             youtube_pot_provider_url=youtube_pot_provider_url,
         )
+        self._adapters[Platform.TWO_CH] = TwoChPlatformAdapter()
         if client:
             self._adapters[Platform.HITMOZ] = HitMozPlatformAdapter(
                 platform=Platform.HITMOZ, client=client
@@ -803,7 +914,11 @@ class DefaultPlatformRegistry:
             return self._adapters[Platform.HITMOZ]
         for platform, domains in PLATFORM_DOMAINS.items():
             if any(host == domain or host.endswith(f".{domain}") for domain in domains):
+                if platform is Platform.TWO_CH and not _is_direct_video_url(url):
+                    return self._adapters[Platform.GENERIC]
                 return self._adapters[platform]
+        if _direct_media_kind(url) is not None:
+            return self._direct_media
         if host:
             return self._adapters[Platform.GENERIC]
         raise DownloadError(ErrorCode.UNSUPPORTED, "Unsupported URL")
@@ -812,6 +927,30 @@ class DefaultPlatformRegistry:
 def _is_hitmoz_host(host: str) -> bool:
     labels = host.split(".")
     return len(labels) >= 2 and labels[-2] in {"hitmoz", "hitmos"}
+
+
+def _is_direct_video_url(url: str) -> bool:
+    return Path(urlsplit(url).path).suffix.lower() in DIRECT_VIDEO_EXTENSIONS
+
+
+def _direct_media_kind(url: str) -> MediaKind | None:
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if suffix in DIRECT_VIDEO_EXTENSIONS:
+        return MediaKind.VIDEO
+    if suffix in DIRECT_AUDIO_EXTENSIONS:
+        return MediaKind.AUDIO
+    return None
+
+
+def _two_ch_media_urls(url: str) -> tuple[str, ...]:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    port = f":{parsed.port}" if parsed.port else ""
+    domains = PLATFORM_DOMAINS[Platform.TWO_CH]
+    ordered = (host, *(domain for domain in domains if domain != host))
+    return tuple(
+        urlunsplit(parsed._replace(netloc=f"{domain}{port}")) for domain in ordered
+    )
 
 
 def _native_spotify_asset(payload: dict, index: int) -> MediaAsset:

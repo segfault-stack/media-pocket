@@ -36,7 +36,8 @@ SOCIAL_PLATFORMS = frozenset(
 START_TEXT = (
     "<b>✨ Download media without the clutter</b>\n\n"
     "Send a link from YouTube, TikTok, Instagram, X, Threads, Pinterest, "
-    "SoundCloud, Spotify, HitMoz, or Zaycev. Choose a format, then I’ll deliver it here.\n\n"
+    "SoundCloud, Spotify, HitMoz, Zaycev, or a direct media URL. "
+    "Choose a format, then I’ll deliver it here.\n\n"
     "<b>Quick examples</b>\n"
     "<code>https://youtube.com/watch?v=…</code> — open format picker\n"
     "<code>!a https://youtube.com/watch?v=…</code> — download audio now\n\n"
@@ -44,9 +45,9 @@ START_TEXT = (
 )
 HELP_TEXT = (
     "<b>📖 Downloader Bot help</b>\n\n"
-    "<blockquote expandable><b>Platforms</b>\nVideo: YouTube and generic media links.\n"
+    "<blockquote expandable><b>Platforms</b>\nVideo: YouTube and direct video links, including 2ch files.\n"
     "Social: TikTok, Instagram, X, Threads, and Pinterest.\n"
-    "Audio: Spotify, SoundCloud, HitMoz, and Zaycev.</blockquote>\n"
+    "Audio: Spotify, SoundCloud, HitMoz, Zaycev, and direct audio links.</blockquote>\n"
     "<blockquote expandable><b>Formats</b>\nUse the picker for Video, Audio, Media, "
     "and Media/File delivery. Compatible quality is selected automatically. "
     "Use <code>/audio URL</code> or "

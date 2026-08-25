@@ -35,8 +35,10 @@ from downloader_bot.domain.youtube import (
 from downloader_bot.infrastructure.platforms import (
     PLATFORM_DOMAINS,
     DefaultPlatformRegistry,
+    DirectMediaPlatformAdapter,
     HitMozPlatformAdapter,
     SpotifyPlatformAdapter,
+    TwoChPlatformAdapter,
     YtDlpPlatformAdapter,
     ZaycevPlatformAdapter,
     _stop_process_group,
@@ -58,7 +60,12 @@ from downloader_bot.infrastructure.platforms import (
         ("https://hitmoz.me/album/532028", Platform.HITMOZ),
         ("https://hitmos.me/album/532028", Platform.HITMOZ),
         ("https://zaycev.net/pages/249134/24913430.shtml", Platform.ZAYCEV),
+        (
+            "https://2ch.life/b/src/336036947/17876884751720201280.mp4",
+            Platform.TWO_CH,
+        ),
         ("https://example.com/file.mp4", Platform.GENERIC),
+        ("https://cdn.example/audio/track.flac?token=x", Platform.GENERIC),
     ],
 )
 def test_registry_detects_every_supported_platform(url, platform) -> None:
@@ -67,6 +74,52 @@ def test_registry_detects_every_supported_platform(url, platform) -> None:
 
 def test_platform_inventory_is_complete() -> None:
     assert set(PLATFORM_DOMAINS) == set(Platform) - {Platform.GENERIC}
+
+
+def test_two_ch_thread_page_keeps_generic_fallback() -> None:
+    adapter = DefaultPlatformRegistry().detect("https://2ch.hk/b/res/123.html")
+
+    assert isinstance(adapter, YtDlpPlatformAdapter)
+    assert adapter.platform is Platform.GENERIC
+
+
+@pytest.mark.asyncio
+async def test_two_ch_direct_video_has_ordered_mirror_fallbacks() -> None:
+    url = "https://2ch.life/b/src/336036947/17876884751720201280.mp4"
+    adapter = DefaultPlatformRegistry().detect(url)
+
+    assert isinstance(adapter, TwoChPlatformAdapter)
+    post = await adapter.resolve(url, UserPreferences())
+
+    assert post.source_url == url
+    assert post.platform is Platform.TWO_CH
+    assert post.assets[0].kind is MediaKind.VIDEO
+    assert post.assets[0].source_url == url
+    assert post.assets[0].fallback_urls == (
+        "https://2ch.hk/b/src/336036947/17876884751720201280.mp4",
+        "https://2ch.su/b/src/336036947/17876884751720201280.mp4",
+    )
+    assert dict(post.assets[0].request_headers)["Referer"] == "https://2ch.life/"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "kind"),
+    [
+        ("https://cdn.example/media/video.webm?token=x", MediaKind.VIDEO),
+        ("https://cdn.example/audio/track.flac?token=x", MediaKind.AUDIO),
+    ],
+)
+async def test_generic_direct_media_bypasses_ytdlp(url, kind) -> None:
+    adapter = DefaultPlatformRegistry().detect(url)
+
+    assert isinstance(adapter, DirectMediaPlatformAdapter)
+    post = await adapter.resolve(url, UserPreferences())
+
+    assert post.platform is Platform.GENERIC
+    assert post.assets[0].source_url == url
+    assert post.assets[0].kind is kind
+    assert post.assets[0].fallback_urls == ()
 
 
 def test_registry_routes_fixed_provider_cookie_files() -> None:
@@ -106,7 +159,10 @@ async def test_registry_uses_specialized_adapters() -> None:
         registry.detect("https://youtube.com/watch?v=x"), YtDlpPlatformAdapter
     )
     assert isinstance(
-        registry.detect("https://example.com/file.mp4"), YtDlpPlatformAdapter
+        registry.detect("https://example.com/file.mp4"), DirectMediaPlatformAdapter
+    )
+    assert isinstance(
+        registry.detect("https://2ch.su/b/src/file.mp4"), TwoChPlatformAdapter
     )
     assert isinstance(
         registry.detect("https://open.spotify.com/track/x"), SpotifyPlatformAdapter

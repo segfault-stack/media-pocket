@@ -137,6 +137,48 @@ async def test_http_engine_downloads_and_hashes_without_network(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_http_engine_tries_direct_media_mirrors(tmp_path) -> None:
+    hosts = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.host == "2ch.life":
+            return httpx.Response(403)
+        return httpx.Response(
+            200,
+            content=b"video",
+            headers={"content-length": "5", "content-type": "video/mp4"},
+        )
+
+    asset = MediaAsset(
+        "https://2ch.life/b/src/video.mp4",
+        MediaKind.VIDEO,
+        fallback_urls=(
+            "https://2ch.hk/b/src/video.mp4",
+            "https://2ch.su/b/src/video.mp4",
+        ),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await HttpDownloadEngine(client, tmp_path).download(
+            MediaPost("https://2ch.life/b/res/1.html", Platform.TWO_CH, (asset,)),
+            Job(
+                "mirror-job",
+                1,
+                1,
+                "https://2ch.life/b/src/video.mp4",
+                "key",
+                preferences=UserPreferences(document_mode=True),
+            ),
+            lambda _progress: asyncio.sleep(0),
+            Cancellation(),
+        )
+
+    assert hosts == ["2ch.life", "2ch.hk"]
+    assert result[0].kind is MediaKind.VIDEO
+    assert Path(result[0].path).read_bytes() == b"video"
+
+
+@pytest.mark.asyncio
 async def test_force_audio_changes_video_artifact_kind_and_keeps_metadata(
     monkeypatch, tmp_path
 ) -> None:

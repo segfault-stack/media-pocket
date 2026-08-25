@@ -20,6 +20,7 @@ class Platform(StrEnum):
     SPOTIFY = "spotify"
     HITMOZ = "hitmoz"
     ZAYCEV = "zaycev"
+    TWO_CH = "2ch"
     GENERIC = "generic"
 
 
@@ -169,6 +170,7 @@ class MediaAsset:
     cookies_file: str | None = None
     thumbnail_url: str | None = None
     requires_extractor_download: bool = False
+    fallback_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

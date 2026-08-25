@@ -41,12 +41,15 @@ The bot and workers run as separate processes. PostgreSQL stores canonical state
 | --- | --- | --- |
 | Video | YouTube | video, audio, playlists, automatic compatible formats, per-user mode |
 | Social | TikTok, Instagram, X / Twitter, Threads, Pinterest | media-first delivery, audio extraction, files, provider collections |
-| Audio | Spotify, SoundCloud, Zaycev.net, HitMoz | tracks, albums and playlists where supported, native Spotify audio or fallback |
-| Generic | HTTP(S) links | format detection and yt-dlp resolution where supported |
+| Audio | Spotify, SoundCloud, Zaycev.net, HitMoz | tracks, collections where supported, native Spotify audio or fallback |
+| Direct media | HTTP(S) audio/video URLs, direct 2ch video files | direct download; known 2ch mirrors retry automatically |
+| Generic | Other HTTP(S) links | yt-dlp resolution where supported |
 
-Video sources can offer **Video** or **Audio** and **Media** or **File** delivery where those choices apply. MediaPocket automatically selects the best practical source format and prefers native Telegram playback over expensive transcoding. **File** delivery preserves the downloaded source whenever possible. Audio-first providers expose only relevant controls.
+Direct media detection uses the URL path extension, including common formats such as MP4, WebM, MP3, M4A, Ogg, Opus, WAV, and FLAC. For 2ch, this applies to direct video-file URLs rather than thread pages.
 
-For in-chat playback, MediaPocket prefers source H.264/AAC video and M4A/AAC or MP3 audio. It remuxes compatible streams without re-encoding, converts only an incompatible stream when possible, and falls back to full conversion only when Telegram needs it. Audio includes title, performer, duration, and thumbnail metadata when the provider supplies it.
+Video sources can offer **Video** or **Audio** and **Media** or **File** delivery where those choices apply. Media Pocket automatically selects the best practical source format and prefers native Telegram playback over expensive transcoding. **File** delivery preserves the downloaded source whenever possible. Audio-first providers expose only relevant controls.
+
+For in-chat playback, Media Pocket prefers source H.264/AAC video and M4A/AAC or MP3 audio. It remuxes compatible streams without re-encoding, converts only an incompatible stream when possible, and falls back to full conversion only when Telegram needs it. Audio includes title, performer, duration, and thumbnail metadata when the provider supplies it.
 
 ## 🔄 Download flow
 
@@ -124,6 +127,25 @@ docker compose ps
 ```
 
 The image contains the locked Python environment and media toolchain. Compose mounts the checkout at `/app` read-only and provides separate writable volumes for downloads, logs, cookies, and Spotify state. Restart the bot and workers after source changes; rebuild only when dependencies or the toolchain change.
+
+### Verify and update safely
+
+After startup, `docker compose ps` should show PostgreSQL and Redis as healthy and the bot and workers as running. If a process exits, inspect a bounded log tail with `docker compose logs --tail=100 bot worker`; review logs before sharing them because provider URLs and user activity may be sensitive.
+
+PostgreSQL is canonical state. Before changing versions or running new migrations, stop new work and create a logical backup at a new host path:
+
+```bash
+docker compose stop bot worker
+set -C
+docker compose exec -T postgres \
+  pg_dump -U bot_user -d downloader_bot --format=custom \
+  > media-pocket-backup.dump
+test -s media-pocket-backup.dump
+```
+
+`set -C` prevents accidentally overwriting an existing backup in that shell. Store the resulting dump outside the checkout and test restoration against an isolated PostgreSQL instance before relying on it.
+
+For an update, review an immutable release tag from a clean checkout, initialize its pinned submodules, rebuild, run migrations once, and then restart the stack. Source rollback is safe only when the older revision supports the migrated database schema. Otherwise, restore the verified pre-update backup into isolated state; do not delete or replace the existing PostgreSQL, Redis, Telegram Bot API, download, or Spotify volumes as a rollback shortcut.
 
 ## 🤖 Using the bot
 
@@ -286,9 +308,10 @@ See [architecture details](docs/architecture-v2.md), the [code map](docs/code-ma
 
 ## 🧰 Development
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the locked Python 3.14 environment:
+From the repository root, install [uv](https://docs.astral.sh/uv/getting-started/installation/), initialize the pinned submodules, and create the locked Python 3.14 environment:
 
 ```bash
+git submodule update --init --recursive
 uv sync --locked
 
 uv run ruff check downloader_bot acceptance_tests main.py
@@ -326,6 +349,7 @@ scripts/security-check
 - Telegram and local storage limits still apply.
 - Cancellation is cooperative and may not interrupt every provider operation instantly.
 - The bot does not automate login, CAPTCHA, 2FA, or provider account recovery.
+- The repository is published for inspection and self-hosting; there is no formal support response time, compatibility lifetime, or contribution program.
 
 <div align="center">
 
