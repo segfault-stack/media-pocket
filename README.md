@@ -26,7 +26,7 @@
 Media Pocket turns Telegram into a private media inbox. Send one link or a batch; the bot resolves the provider, chooses the natural format, shows live progress, and returns the finished media.
 
 | | |
-| --- | --- |
+| :---: | :---: |
 | **🎯 Natural by default**<br>Video stays video, audio-first sources stay audio, and YouTube follows each user's saved preference. | **✨ Clean delivery**<br>Media carries no caption or source URL, and non-audio filenames are randomized. Status, source links, and actions remain separate. |
 | **📚 Built for collections**<br>Single links, batches, albums, and playlists share the same durable PostgreSQL and Redis-backed workflow. | **🔐 Private by design**<br>Invitation checks cover private chats, groups, Business messages, callbacks, and inline mode. |
 
