@@ -1,28 +1,32 @@
-FROM mwader/static-ffmpeg:8.1.1 AS ffmpeg
-FROM denoland/deno:bin-2.9.4 AS deno
+FROM mwader/static-ffmpeg:9.0.1 AS ffmpeg
+FROM denoland/deno:bin-2.9.5 AS deno
+FROM ghcr.io/astral-sh/uv:0.12.5 AS uv
 
-FROM rust:1.85-bookworm AS spotify-builder
+FROM rust:1.98-bookworm AS spotify-builder
 
 WORKDIR /build
 COPY third_party/librespot ./third_party/librespot
 COPY tools/spotify-streamer ./tools/spotify-streamer
 RUN cargo build --manifest-path tools/spotify-streamer/Cargo.toml --release --locked
 
-FROM python:3.14-slim AS builder
+FROM python:3.14.7-slim AS builder
 
-ENV VIRTUAL_ENV=/opt/venv \
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH"
 
-RUN python -m venv "$VIRTUAL_ENV"
+COPY --from=uv /uv /uvx /bin/
 
-COPY requirements.txt /tmp/requirements.txt
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --disable-pip-version-check -r /tmp/requirements.txt \
-    && rm -rf "$VIRTUAL_ENV"/lib/python*/site-packages/pip* \
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project \
     && find "$VIRTUAL_ENV" -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
-FROM python:3.14-slim AS runtime
+FROM python:3.14.7-slim AS runtime
 
 ENV TZ=UTC \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -41,7 +45,9 @@ COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=spotify-builder /build/tools/spotify-streamer/target/release/spotify-streamer /usr/local/bin/spotify-streamer
 
-RUN chown appuser:appgroup /app \
+RUN install -d -o appuser -g appgroup \
+        /app/downloads /app/logs /app/cookies /app/spotify \
+    && chown appuser:appgroup /app \
     && python -c "from importlib.metadata import version; import aiogram, asyncpg, curl_cffi, httpx, psycopg2, redis, sqlalchemy, yt_dlp, yt_dlp_ejs; version('bgutil-ytdlp-pot-provider')" \
     && ffmpeg -version >/dev/null \
     && ffprobe -version >/dev/null \

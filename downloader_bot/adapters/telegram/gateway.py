@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -94,10 +95,8 @@ class AiogramTelegramGateway:
     async def show_status(self, job: Job, progress: Progress) -> int | None:
         if progress.stage is JobStage.DELIVERED and not job.inline_message_id:
             if job.status_message_id:
-                try:
+                with suppress(TelegramBadRequest):
                     await self._bot.delete_message(job.chat_id, job.status_message_id)
-                except TelegramBadRequest:
-                    pass
             return job.status_message_id
         markup = _status_keyboard(job)
         if progress.stage is JobStage.FAILED:
@@ -169,14 +168,12 @@ class AiogramTelegramGateway:
         if not job.inline_message_id:
             return
         markup = _inline_private_keyboard(job, self._bot_username)
-        try:
+        with suppress(TelegramBadRequest):
             await self._bot.edit_message_text(
                 INLINE_SENT_TEXT if ready else INLINE_FALLBACK_TEXT,
                 inline_message_id=job.inline_message_id,
                 reply_markup=markup,
             )
-        except TelegramBadRequest:
-            pass
 
     async def _deliver_media_groups(
         self,

@@ -1,0 +1,5 @@
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - Dockerfile
+    statement: The root entrypoint prepares mounted volumes and immediately drops to appuser.

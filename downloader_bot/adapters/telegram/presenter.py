@@ -510,10 +510,12 @@ def render_status(jobs: tuple[Job, ...]) -> str:
     if not jobs:
         return "<b>📊 Your downloads</b>\nNo recent downloads yet."
     lines = ["<b>📊 Your downloads</b>"]
-    for job in jobs:
-        lines.append(
+    lines.extend(
+        (
             f"\n{STAGE_LABELS[job.stage]} · <code>{escape(_short_url(job.source_url))}</code>"
         )
+        for job in jobs
+    )
     return "".join(lines)
 
 

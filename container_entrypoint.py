@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_COMMAND = ["python", "main.py"]
-MANAGED_PATHS = ("/app/downloads", "/app/logs", "/app/cookies")
+MANAGED_PATHS = ("/app/downloads", "/app/logs", "/app/cookies", "/app/spotify")
 DEFAULT_YOUTUBE_COOKIES_FILE = Path("/app/cookies/youtube.txt")
 RUNTIME_YOUTUBE_COOKIES_FILE = Path("/tmp/media-pocket/cookies/youtube.txt")
 
@@ -28,7 +28,10 @@ def _chown_path(path: Path, *, uid: int, gid: int) -> bool:
 
 def _ensure_runtime_access(path: Path, *, owner_only: bool) -> None:
     # Shared artifact volumes must remain writable by the host and container user.
-    access_mode = 0o777 if path.is_dir() else 0o666
+    if path.is_dir():
+        access_mode = 0o700 if owner_only else 0o770
+    else:
+        access_mode = 0o600 if owner_only else 0o660
     try:
         os.chmod(path, access_mode)
     except PermissionError:
@@ -116,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         _drop_privileges(user_name=user.pw_name, group_name=group.gr_name)
 
     # Artifacts are shared between independently scaled worker and bot processes.
-    os.umask(0o000)
+    os.umask(0o007)
 
     os.execvp(command[0], command)
     return 0

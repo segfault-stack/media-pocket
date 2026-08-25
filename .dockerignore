@@ -1,7 +1,8 @@
 # The image contains the runtime toolchain only. Application source is bind-mounted.
 **
 
-!requirements.txt
+!pyproject.toml
+!uv.lock
 !third_party/
 !third_party/librespot/
 !third_party/librespot/**

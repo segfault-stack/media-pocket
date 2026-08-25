@@ -1,0 +1,5 @@
+[environment]
+python-version = "3.14"
+
+[src]
+include = ["downloader_bot", "main.py", "container_entrypoint.py"]

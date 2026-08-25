@@ -907,7 +907,7 @@ class SqlAnalyticsRepository:
             rows = await session.execute(
                 select(AnalyticsRow.event, func.count()).group_by(AnalyticsRow.event)
             )
-            return {event: count for event, count in rows}
+            return dict(rows.tuples())
 
 
 def _job_values(job: Job) -> dict[str, object]:

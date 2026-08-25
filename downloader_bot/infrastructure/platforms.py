@@ -251,7 +251,7 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
         if self.command:
             try:
                 return await self._resolve_native(url)
-            except (DownloadError, OSError, asyncio.TimeoutError, json.JSONDecodeError):
+            except (DownloadError, OSError, TimeoutError, json.JSONDecodeError):
                 # Native Spotify is deliberately best-effort. The normal resolver below
                 # keeps links usable when no Premium session is configured or it expires.
                 pass
@@ -392,10 +392,12 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=self.resolve_timeout_seconds
             )
-        except TimeoutError:
+        except TimeoutError as exc:
             process.kill()
             await process.wait()
-            raise DownloadError(ErrorCode.PROVIDER_FAILURE, "Spotify resolver timed out")
+            raise DownloadError(
+                ErrorCode.PROVIDER_FAILURE, "Spotify resolver timed out"
+            ) from exc
         if process.returncode:
             raise DownloadError(
                 ErrorCode.PROVIDER_FAILURE,

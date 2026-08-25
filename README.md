@@ -2,7 +2,7 @@
 
 # 📥 Media Pocket
 
-### Send a link. Pick a format. Get clean media back.
+### Send a link. Get clean media back.
 
 **An invite-only, self-hosted Telegram downloader for video, audio, social posts, albums, playlists, and batches.**
 
@@ -22,7 +22,7 @@
 
 ---
 
-Media Pocket turns Telegram into a private media inbox. Send one link or a batch, choose the format once, and let workers handle extraction, conversion, and delivery.
+Media Pocket turns Telegram into a private media inbox. Send one link or a batch and let workers handle extraction, conversion, and delivery. Provider-native defaults avoid a menu on every request, while YouTube can be configured per user for video, audio, or an explicit format prompt.
 
 > **link → provider-native mode → live progress → clean media**
 
@@ -36,33 +36,30 @@ The bot is deliberately not open to everyone. An administrator creates short inv
 > [!TIP]
 > [Media Cookie Broker](https://github.com/segfault-stack/media-cookie-broker) is an optional companion project for keeping provider cookie jars refreshed. Media Pocket does not bundle it; operators configure the broker and cookie-sync connection separately.
 
-## Two processes by design
+## Bot and worker, separated
 
-```text
-TELEGRAM                         YOUR SERVER
+```mermaid
+flowchart LR
+    telegram["Telegram<br/>user or group"]
 
-┌──────────────────┐            ┌──────────────────────┐
-│ user / group     │───────────►│ bot                  │
-│ link or batch    │            │ menus + delivery     │
-└──────────────────┘            └──────────┬───────────┘
-                                          │ PostgreSQL job
-                                          ▼
-                               ┌──────────────────────┐
-                               │ Redis Streams        │
-                               └──────────┬───────────┘
-                                          │
-                                          ▼
-                               ┌──────────────────────┐
-                               │ worker(s)            │
-                               │ resolve + download   │
-                               │ FFmpeg normalization │
-                               └──────────┬───────────┘
-                                          │ shared artifacts
-                                          ▼
-                               ┌──────────────────────┐
-                               │ bot                  │
-                               │ Telegram delivery    │
-                               └──────────────────────┘
+    subgraph server["Your server"]
+        bot["Bot<br/>access, menus, delivery"]
+        postgres[("PostgreSQL<br/>users and jobs")]
+        redis[("Redis Streams<br/>queue and progress")]
+        worker["Worker<br/>extract, download, normalize"]
+        artifacts[("Shared artifacts")]
+
+        bot -->|save job| postgres
+        bot -->|enqueue| redis
+        redis -->|claim job| worker
+        worker -->|publish progress| redis
+        worker -->|write media| artifacts
+        redis -->|update status| bot
+        artifacts -->|deliver result| bot
+    end
+
+    telegram -->|link or batch| bot
+    bot -->|file or media group| telegram
 ```
 
 Only the bot process holds a Telegram client. Workers resolve and download media, report structured progress through Redis, and leave delivery to the bot.
@@ -337,17 +334,37 @@ See [architecture details](docs/architecture-v2.md) and the [behavior inventory]
 
 ## 🧪 Development
 
-```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the locked development environment:
 
-.venv/bin/ruff check downloader_bot acceptance_tests main.py
-.venv/bin/mypy downloader_bot main.py --ignore-missing-imports --check-untyped-defs
-.venv/bin/python -m compileall -q downloader_bot main.py
-.venv/bin/pytest --cov=downloader_bot --cov-fail-under=80
+```bash
+uv sync --locked
+
+uv run ruff check downloader_bot acceptance_tests main.py
+uv run ty check
+uv run python -m compileall -q downloader_bot main.py
+uv run pytest --cov=downloader_bot --cov-fail-under=80
 ```
 
-The acceptance suite is network-free and mocks Telegram, providers, PostgreSQL repositories, and Redis Streams.
+Install the fast Git hook runner once per checkout and run the same gate manually when needed:
+
+```bash
+uv run prek install
+uv run prek run --all-files
+scripts/security-check
+```
+
+`uv.lock` is the single dependency lock for both the runtime image and local development. Prek checks file integrity, the lockfile, Ruff, and ty before commits. The security script runs pinned Gitleaks and Trivy containers against Git history, dependencies, and deployment configuration; its first run downloads the scanner images and vulnerability database. GitHub Actions runs these checks and the network-free acceptance suite on pushes and pull requests, with a weekly vulnerability rescan.
+
+The development stack is intentionally small:
+
+- **uv** manages Python 3.14 and the fully locked environment;
+- **Ruff** handles linting and formatting checks;
+- **ty** performs static type checking;
+- **prek** runs the local pre-commit gate;
+- **pytest** enforces at least 80% production-code coverage;
+- **Gitleaks** and **Trivy** scan committed history, dependency locks, and deployment files.
+
+Docker builds the reproducible runtime environment and media toolchain, not a private copy of the application source. Compose mounts the checkout read-only and gives only runtime data directories writable volumes. This keeps source edits fast during self-hosted development while preserving a pinned environment through `uv.lock` and the container image.
 
 ---
 

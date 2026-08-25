@@ -169,8 +169,12 @@ hasil.html
 maxload.db
 .idea
 .vscode
-downloads
-logs/
+downloads/*
+!downloads/.gitkeep
+logs/*
+!logs/.gitkeep
+spotify/*
+!spotify/.gitkeep
 .runtime_state.json
 .antigravitycli/
 .antigravitycli

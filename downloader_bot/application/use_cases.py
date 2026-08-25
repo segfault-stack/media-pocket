@@ -127,7 +127,7 @@ class SubmitDownload:
             f"{command.user_id}\0{url}\0{variant}\0{dedupe_scope or ''}".encode()
         ).hexdigest()
         now = self._clock.now()
-        job = Job(
+        return Job(
             id=self._ids.new(),
             user_id=command.user_id,
             chat_id=command.chat_id,
@@ -144,7 +144,6 @@ class SubmitDownload:
             created_at=now,
             updated_at=now,
         )
-        return job
 
 
 class CancelDownload:
