@@ -109,6 +109,7 @@ services:
   cookie-sync:
     profiles: ["cookie-broker"]
     image: ${COOKIE_BROKER_IMAGE:-replace-with-cookie-broker-image}
+    user: "1000:1000"
     entrypoint: ["cookie-sync"]
     env_file:
       - path: .env
