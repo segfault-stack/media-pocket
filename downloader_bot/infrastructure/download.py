@@ -39,6 +39,7 @@ class HttpDownloadEngine:
         spotify_command: str = "spotify-streamer",
         spotify_cache_dir: str = "spotify",
         spotify_bitrate: int = 320,
+        youtube_pot_provider_url: str | None = None,
     ) -> None:
         if max_parallel_downloads < 1:
             raise ValueError("max_parallel_downloads must be at least 1")
@@ -49,6 +50,21 @@ class HttpDownloadEngine:
         self._spotify_command = spotify_command
         self._spotify_cache_dir = spotify_cache_dir
         self._spotify_bitrate = spotify_bitrate
+        self._youtube_pot_provider_url = youtube_pot_provider_url
+
+    def _youtube_extractor_args(self) -> list[str]:
+        args = [
+            "--extractor-args",
+            f"youtube:player_client={os.getenv('YTDLP_YOUTUBE_PLAYER_CLIENT', 'mweb')}",
+        ]
+        if self._youtube_pot_provider_url:
+            args.extend(
+                (
+                    "--extractor-args",
+                    f"youtubepot-bgutilhttp:base_url={self._youtube_pot_provider_url}",
+                )
+            )
+        return args
 
     async def download(
         self, post: MediaPost, job: Job, progress, cancellation
@@ -213,12 +229,11 @@ class HttpDownloadEngine:
                 or ("bestaudio/best" if job.audio_only else "best"),
                 "--max-filesize",
                 str(self._max_file_size),
-                "--extractor-args",
-                f"youtube:player_client={os.getenv('YTDLP_YOUTUBE_PLAYER_CLIENT', 'mweb')}",
                 "--output",
                 str(output_template),
                 asset.extractor_url,
             ]
+            command[-3:-3] = self._youtube_extractor_args()
             if cookie_file:
                 command[-1:-1] = ["--cookies", cookie_file]
             process = await asyncio.create_subprocess_exec(
@@ -288,13 +303,8 @@ class HttpDownloadEngine:
             ]
             if cookie_file:
                 command.extend(("--cookies", cookie_file))
-            command.extend(
-                (
-                    "--extractor-args",
-                    f"youtube:player_client={os.getenv('YTDLP_YOUTUBE_PLAYER_CLIENT', 'mweb')}",
-                    f"ytsearch1:{asset.fallback_query}",
-                )
-            )
+            command.extend(self._youtube_extractor_args())
+            command.append(f"ytsearch1:{asset.fallback_query}")
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,

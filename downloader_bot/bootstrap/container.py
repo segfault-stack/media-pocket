@@ -183,6 +183,7 @@ async def build_container(settings: Settings) -> Container:
                 spotify_command=settings.spotify_command or "spotify-streamer",
                 spotify_cache_dir=str(settings.spotify_cache_dir),
                 spotify_bitrate=settings.spotify_bitrate,
+                youtube_pot_provider_url=settings.youtube_pot_provider_url,
             ),
             artifacts,
             progress,

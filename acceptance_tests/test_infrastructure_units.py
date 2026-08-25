@@ -205,7 +205,11 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
         events.append(event)
 
     async with httpx.AsyncClient() as client:
-        output = await HttpDownloadEngine(client, tmp_path)._download_with_ytdlp(
+        output = await HttpDownloadEngine(
+            client,
+            tmp_path,
+            youtube_pot_provider_url="http://youtube-pot-provider:4416",
+        )._download_with_ytdlp(
             MediaAsset(
                 "https://googlevideo.example/audio",
                 MediaKind.AUDIO,
@@ -225,6 +229,7 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
     assert output.name == "Artist - Track.webm"
     assert output.read_bytes() == b"audio"
     assert "youtube:player_client=mweb" in command
+    assert "youtubepot-bgutilhttp:base_url=http://youtube-pot-provider:4416" in command
     assert str(cookie_snapshot) not in command
     assert copied_cookie_file is not None and not copied_cookie_file.exists()
     assert events[-1].item_count == 2
