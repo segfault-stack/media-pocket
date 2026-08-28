@@ -90,6 +90,7 @@ class SelectionCreator:
             mode=SelectionMode.VIDEO,
             quality="best",
             delivery=DeliveryMode.MEDIA,
+            chapter_count=values.get("chapter_count", 0),
             job_kind=values.get("kind", JobKind.DIRECT),
             created_at=now,
             expires_at=now + timedelta(minutes=15),
@@ -124,6 +125,8 @@ class SelectionActions:
     async def execute(self, _token, _user_id, *, action, value):
         if action == "quality":
             self.selection = replace(self.selection, quality=value)
+        elif action == "mode":
+            self.selection = replace(self.selection, mode=SelectionMode(value))
         return self.selection
 
     async def cancel(self, _token, _user_id):
@@ -178,9 +181,16 @@ class Stub:
 
 
 class SubmissionPlanner:
-    def __init__(self, *, audio_only_by_url=(False,), ask_for_youtube=False) -> None:
+    def __init__(
+        self,
+        *,
+        audio_only_by_url=(False,),
+        ask_for_youtube=False,
+        chapter_count=0,
+    ) -> None:
         self.audio_only_by_url = audio_only_by_url
         self.ask_for_youtube = ask_for_youtube
+        self.chapter_count = chapter_count
 
     async def execute(self, _user_id, urls):
         modes = self.audio_only_by_url
@@ -189,6 +199,7 @@ class SubmissionPlanner:
         return SimpleNamespace(
             audio_only_by_url=modes,
             ask_for_youtube=self.ask_for_youtube,
+            chapter_count=self.chapter_count,
         )
 
 
@@ -336,6 +347,68 @@ async def test_plain_youtube_link_starts_video_unless_user_always_asks() -> None
     await links(SimpleNamespace(**base, text="/video https://youtube.com/watch?v=x"))
     assert submit.commands[-1].audio_only is False
     assert gateway.status[-1][0].id == "single"
+
+
+@pytest.mark.asyncio
+async def test_timestamped_youtube_video_always_opens_chapter_choice() -> None:
+    submit, batch, gateway = Submit(), Batch(), SelectionGateway()
+    create, stub = SelectionCreator(), Stub()
+    router = build_router(
+        submit,
+        batch,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        gateway,
+        Jobs(),
+        create_selection=create,
+        update_selection=stub,
+        confirm_selection=stub,
+        plan_submission=SubmissionPlanner(chapter_count=13),
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        chat=SimpleNamespace(id=2, type=ChatType.PRIVATE),
+        text="/video https://youtu.be/y_y5T1a1iq4",
+        message_id=3,
+        business_connection_id=None,
+    )
+    await handler(router, "message", "links")(message)
+    assert not submit.commands
+    assert create.calls[-1]["chapter_count"] == 13
+    assert create.calls[-1]["mode_override"] is SelectionMode.VIDEO
+    assert gateway.selections[-1].chapter_count == 13
+
+
+@pytest.mark.asyncio
+async def test_explicit_video_still_overrides_saved_audio_mode_after_preflight() -> None:
+    submit, batch, gateway = Submit(), Batch(), Gateway()
+    stub = Stub()
+    router = build_router(
+        submit,
+        batch,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        gateway,
+        Jobs(),
+        plan_submission=SubmissionPlanner(audio_only_by_url=(True,)),
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        chat=SimpleNamespace(id=2, type=ChatType.PRIVATE),
+        text="/video https://youtube.com/watch?v=x",
+        message_id=3,
+        business_connection_id=None,
+    )
+    await handler(router, "message", "links")(message)
+    assert submit.commands[-1].audio_only is False
 
 
 @pytest.mark.asyncio
@@ -552,6 +625,7 @@ async def test_navigation_selection_status_and_result_callbacks(monkeypatch) -> 
         created_at=now,
         expires_at=now + timedelta(minutes=15),
         status_message_id=77,
+        chapter_count=13,
     )
     selection_actions = SelectionActions(selection)
     confirm = Confirm(selection)
@@ -645,9 +719,10 @@ async def test_navigation_selection_status_and_result_callbacks(monkeypatch) -> 
         await handler(router, "callback_query", "update_settings")(query)
     await handler(router, "message", "show_status")(message)
 
-    query.data = "sel:confirm:selection-token"
+    query.data = "sel:start:split:selection-token"
     await handler(router, "callback_query", "selection_action")(query)
     assert gateway.status[-1][0].id == "confirmed"
+    assert selection_actions.selection.mode is SelectionMode.SPLIT
     selection_actions.selection = replace(selection, cancelled_at=None)
     query.data = "sel:cancel:selection-token"
     await handler(router, "callback_query", "selection_action")(query)

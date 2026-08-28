@@ -474,6 +474,58 @@ async def test_ytdlp_audio_selection_uses_requested_download_codec(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_ytdlp_repairs_description_chapters_and_keeps_parentheses(
+    monkeypatch,
+) -> None:
+    payload = {
+        "url": "https://cdn.youtube.example/audio.m4a",
+        "ext": "m4a",
+        "vcodec": "none",
+        "title": "Full album",
+        "duration": 180,
+        "description": (
+            "TRACKLIST:\n"
+            "01: Intro: 00:00\n"
+            "02: Track (Studio Outtake): 01:09\n"
+            "03: Finale: 02:30"
+        ),
+        "chapters": [
+            {"start_time": 0, "end_time": 69, "title": "01: Intro"},
+            {
+                "start_time": 69,
+                "end_time": 150,
+                "title": "02: Track (Studio Outtake",
+            },
+            {"start_time": 150, "end_time": 180, "title": "03: Finale"},
+        ],
+    }
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return json.dumps(payload).encode(), b""
+
+    async def create(*_args, **_kwargs):
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    post = await YtDlpPlatformAdapter(Platform.YOUTUBE).resolve(
+        "https://youtube.com/watch?v=album",
+        UserPreferences(),
+        audio_only=True,
+    )
+    assert tuple(chapter.title for chapter in post.chapters) == (
+        "01: Intro",
+        "02: Track (Studio Outtake)",
+        "03: Finale",
+    )
+    assert tuple(
+        (chapter.start_ms, chapter.end_ms) for chapter in post.chapters
+    ) == ((0, 69_000), (69_000, 150_000), (150_000, 180_000))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("detail", "code", "retryable"),
     [
@@ -1012,6 +1064,34 @@ def test_audio_selection_hides_video_quality_and_uses_compact_actions() -> None:
     assert not any(label in labels for label in ("✓ Best", "1080p", "720p", "480p"))
     assert "🎧 Audio · ▶️ In chat" in text
     assert [button.text for button in keyboard[-1]] == ["⬇️ Download", "Cancel"]
+
+
+def test_chapter_selection_offers_one_click_split_or_whole_download() -> None:
+    now = datetime.now(UTC)
+    selection = SelectionRequest(
+        token="12345678-1234-1234-1234-123456789012",
+        user_id=1,
+        chat_id=2,
+        urls=("https://youtu.be/y_y5T1a1iq4",),
+        platforms=(Platform.YOUTUBE,),
+        mode=SelectionMode.VIDEO,
+        quality="best",
+        delivery=DeliveryMode.MEDIA,
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        chapter_count=13,
+    )
+    assert "Album timestamps detected" in render_selection(selection)
+    assert "13 tracks" in render_selection(selection)
+    keyboard = selection_keyboard(selection).inline_keyboard
+    assert [button.text for row in keyboard for button in row] == [
+        "🎵 Split into 13 tracks",
+        "🎬 Whole video",
+        "Cancel",
+    ]
+    assert keyboard[0][0].callback_data == (
+        "sel:start:split:12345678-1234-1234-1234-123456789012"
+    )
 
 
 def test_playlist_selection_starts_with_a_clear_scope_choice() -> None:

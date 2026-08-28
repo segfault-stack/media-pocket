@@ -415,11 +415,13 @@ def build_router(
             else JobKind.DIRECT
         )
         plan = None
-        if not audio_only and not video_only and plan_submission is not None:
+        if plan_submission is not None:
             plan = await plan_submission.execute(message.from_user.id, urls)
         playlist_choice_required = any(has_youtube_playlist(url) for url in urls)
+        chapter_choice_required = plan is not None and plan.chapter_count >= 2
         if create_selection is not None and (
             playlist_choice_required
+            or chapter_choice_required
             or (
                 ux_selection_flow
                 and not audio_only
@@ -440,6 +442,7 @@ def build_router(
                 else SelectionMode.VIDEO
                 if video_only
                 else None,
+                chapter_count=plan.chapter_count if plan is not None else 0,
             )
             status_id = await gateway.show_selection(selection)
             await create_selection.bind_message(
@@ -456,7 +459,9 @@ def build_router(
             submit_batch,
             gateway,
             jobs,
-            audio_only_by_url=plan.audio_only_by_url if plan is not None else None,
+            audio_only_by_url=plan.audio_only_by_url
+            if plan is not None and not audio_only and not video_only
+            else None,
         )
         await _delete_source_if_enabled(message, settings, gateway)
 
@@ -474,6 +479,22 @@ def build_router(
         if current is not None and not current.active:
             await query.answer(ALREADY_HANDLED_TEXT, show_alert=True)
             return
+        if action == "start":
+            if len(parts) != 4 or parts[2] not in {"split", "whole"}:
+                await query.answer(EXPIRED_TEXT, show_alert=True)
+                return
+            if parts[2] == "split":
+                current = await update_selection.execute(
+                    token,
+                    query.from_user.id,
+                    action="mode",
+                    value=SelectionMode.SPLIT.value,
+                )
+                if current is None:
+                    await update_selection.record_expired(query.from_user.id)
+                    await query.answer(EXPIRED_TEXT, show_alert=True)
+                    return
+            action = "confirm"
         if action == "confirm":
             selection, job, claimed = await confirm_selection.execute(
                 token, query.from_user.id
@@ -626,6 +647,7 @@ def build_router(
             )
             if (
                 has_youtube_playlist(urls[0])
+                or (plan is not None and plan.chapter_count >= 2)
                 or (
                     ux_selection_flow
                     and plan is not None

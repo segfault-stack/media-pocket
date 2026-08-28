@@ -5,6 +5,7 @@ This inventory records the supported scenarios retained by the new implementatio
 | Capability | Modular implementation |
 | --- | --- |
 | YouTube videos/audio/playlists | YouTube registry capability, yt-dlp resolver, shared worker |
+| Timestamped YouTube albums | Description/chapter preflight, explicit split choice, one audio download, FFmpeg chapter cuts |
 | Direct media URLs and 2ch files | Direct HTTP audio/video resolver; direct 2ch videos retry known mirrors |
 | TikTok video/photo/profile | TikTok registry capability; multi-entry responses become artifacts |
 | Instagram reels/posts/albums | Instagram registry capability and multi-entry post artifacts |

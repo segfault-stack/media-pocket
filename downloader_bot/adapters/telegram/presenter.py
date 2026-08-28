@@ -366,6 +366,18 @@ def render_selection(selection: SelectionRequest) -> str:
                 f"<code>{escape(_short_url(selection.urls[0]))}</code>",
             )
         )
+    if (
+        selection.chapter_count >= 2
+        and selection.playlist_scope is not PlaylistScope.PLAYLIST
+    ):
+        return "\n".join(
+            (
+                "<b>🎵 Album timestamps detected</b>",
+                f"Found {selection.chapter_count} tracks in the video description.",
+                "Split them into separate audio tracks or download the whole item.",
+                f"<code>{escape(_short_url(selection.urls[0]))}</code>",
+            )
+        )
     platforms = ", ".join(
         dict.fromkeys(_platform_name(item) for item in selection.platforms)
     )
@@ -413,6 +425,36 @@ def selection_keyboard(selection: SelectionRequest) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 scope_row,
+                [
+                    InlineKeyboardButton(
+                        text="Cancel", callback_data=f"sel:cancel:{token}"
+                    )
+                ],
+            ]
+        )
+    if (
+        selection.chapter_count >= 2
+        and selection.playlist_scope is not PlaylistScope.PLAYLIST
+    ):
+        whole_label = (
+            "🎧 Whole audio"
+            if selection.mode is SelectionMode.AUDIO
+            else "🎬 Whole video"
+        )
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"🎵 Split into {selection.chapter_count} tracks",
+                        callback_data=f"sel:start:split:{token}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=whole_label,
+                        callback_data=f"sel:start:whole:{token}",
+                    )
+                ],
                 [
                     InlineKeyboardButton(
                         text="Cancel", callback_data=f"sel:cancel:{token}"
@@ -732,6 +774,7 @@ def _mode_name(mode: SelectionMode) -> str:
         SelectionMode.VIDEO: "🎬 Video",
         SelectionMode.AUDIO: "🎧 Audio",
         SelectionMode.MEDIA: "▶️ Media",
+        SelectionMode.SPLIT: "🎵 Split tracks",
     }[mode]
 
 

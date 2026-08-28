@@ -19,6 +19,7 @@ import httpx
 from downloader_bot.application.ports import Cancellation, PlatformAdapter
 from downloader_bot.domain import (
     MediaAsset,
+    MediaChapter,
     MediaKind,
     MediaPost,
     MediaSource,
@@ -103,6 +104,11 @@ _ZAYCEV_TRACK_PATTERN = re.compile(r"^/pages/\d+/(?P<id>\d+)\.shtml$")
 _ZAYCEV_API_BASE = "https://zaycev.net/api/external"
 _PROCESS_POLL_SECONDS = 0.25
 _PROCESS_STOP_SECONDS = 2.0
+_MAX_DESCRIPTION_CHAPTERS = 100
+_DESCRIPTION_TIMESTAMP_RE = re.compile(
+    r"(?<!\d)(?:(?P<hours>\d{1,2}):)?(?P<minutes>\d{1,3}):"
+    r"(?P<seconds>[0-5]\d)(?!\d)"
+)
 
 
 class _SpotifyTrack(TypedDict):
@@ -288,6 +294,7 @@ class YtDlpPlatformAdapter:
         )
         if not assets:
             raise DownloadError(ErrorCode.UNAVAILABLE, "No downloadable media found")
+        chapter_source = entries[0] if len(entries) == 1 else data
         return MediaPost(
             source_url=source_url,
             platform=self.platform,
@@ -295,6 +302,7 @@ class YtDlpPlatformAdapter:
             title=data.get("title"),
             author=data.get("uploader") or data.get("artist"),
             caption=data.get("description"),
+            chapters=_media_chapters(chapter_source),
         )
 
     @staticmethod
@@ -1023,6 +1031,74 @@ def _duration_ms(value: object) -> int | None:
     if isinstance(value, (int, float)) and value >= 0:
         return round(value * 1_000)
     return None
+
+
+def _media_chapters(data: Mapping[str, object]) -> tuple[MediaChapter, ...]:
+    duration_ms = _duration_ms(data.get("duration"))
+    description = data.get("description")
+    if isinstance(description, str):
+        parsed = _description_chapters(description, duration_ms)
+        if len(parsed) >= 2:
+            return parsed
+    raw_chapters = data.get("chapters")
+    if not isinstance(raw_chapters, list):
+        return ()
+    starts: list[tuple[int, str, int | None]] = []
+    for raw in raw_chapters[:_MAX_DESCRIPTION_CHAPTERS]:
+        if not isinstance(raw, Mapping):
+            continue
+        start_ms = _duration_ms(raw.get("start_time"))
+        end_ms = _duration_ms(raw.get("end_time"))
+        title = raw.get("title")
+        if start_ms is None or not isinstance(title, str) or not title.strip():
+            continue
+        starts.append((start_ms, title.strip(), end_ms))
+    return _chapter_boundaries(starts, duration_ms)
+
+
+def _description_chapters(
+    description: str, duration_ms: int | None
+) -> tuple[MediaChapter, ...]:
+    starts: list[tuple[int, str, int | None]] = []
+    for line in description.splitlines():
+        matches = tuple(_DESCRIPTION_TIMESTAMP_RE.finditer(line))
+        if len(matches) != 1:
+            continue
+        match = matches[0]
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes"))
+        seconds = int(match.group("seconds"))
+        start_ms = (hours * 3600 + minutes * 60 + seconds) * 1_000
+        title = f"{line[:match.start()]} {line[match.end():]}"
+        title = re.sub(r"^[\s:|\-–—]+|[\s:|\-–—]+$", "", title)
+        if not title or len(title) > 200:
+            continue
+        starts.append((start_ms, title, None))
+        if len(starts) >= _MAX_DESCRIPTION_CHAPTERS:
+            break
+    if len(starts) < 2 or starts[0][0] > 5_000:
+        return ()
+    if starts[0][0] > 0:
+        starts[0] = (0, starts[0][1], None)
+    return _chapter_boundaries(starts, duration_ms)
+
+
+def _chapter_boundaries(
+    starts: list[tuple[int, str, int | None]], duration_ms: int | None
+) -> tuple[MediaChapter, ...]:
+    ordered: list[tuple[int, str, int | None]] = []
+    for item in starts:
+        if ordered and item[0] <= ordered[-1][0]:
+            continue
+        ordered.append(item)
+    chapters: list[MediaChapter] = []
+    for index, (start_ms, title, explicit_end_ms) in enumerate(ordered):
+        next_start = ordered[index + 1][0] if index + 1 < len(ordered) else None
+        end_ms = explicit_end_ms or next_start or duration_ms
+        if end_ms is None or end_ms <= start_ms:
+            continue
+        chapters.append(MediaChapter(title, start_ms, end_ms))
+    return tuple(chapters) if len(chapters) >= 2 else ()
 
 
 def _request_headers(entry: dict, selected: dict) -> tuple[tuple[str, str], ...]:

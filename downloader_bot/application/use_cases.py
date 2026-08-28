@@ -42,6 +42,7 @@ from .ports import (
 )
 
 _RESOLVE_PROGRESS_INTERVAL_SECONDS = 2.0
+_CHAPTER_PREFLIGHT_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,12 +60,14 @@ class SubmitDownloadCommand:
     include_playlist: bool = False
     status_message_id: int | None = None
     inline_message_id: str | None = None
+    split_chapters: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SubmissionPlan:
     audio_only_by_url: tuple[bool, ...]
     ask_for_youtube: bool = False
+    chapter_count: int = 0
 
 
 class PlanSubmission:
@@ -81,7 +84,21 @@ class PlanSubmission:
     ) -> SubmissionPlan:
         preferences = await self._settings.get(user_id)
         youtube_mode = _youtube_mode(preferences)
-        platforms = tuple(self._registry.detect(_validated_url(url)).platform for url in urls)
+        validated = tuple(_validated_url(url) for url in urls)
+        adapters = tuple(self._registry.detect(url) for url in validated)
+        platforms = tuple(adapter.platform for adapter in adapters)
+        chapter_count = 0
+        if len(adapters) == 1 and platforms[0].value == "youtube":
+            try:
+                post = await asyncio.wait_for(
+                    adapters[0].resolve(
+                        validated[0], preferences, audio_only=True
+                    ),
+                    timeout=_CHAPTER_PREFLIGHT_TIMEOUT_SECONDS,
+                )
+                chapter_count = len(post.chapters)
+            except Exception:  # noqa: BLE001 - best-effort; worker owns failures
+                chapter_count = 0
         return SubmissionPlan(
             audio_only_by_url=tuple(
                 platform.value in _AUDIO_PLATFORMS
@@ -90,6 +107,7 @@ class PlanSubmission:
             ),
             ask_for_youtube=youtube_mode == "ask"
             and any(platform.value == "youtube" for platform in platforms),
+            chapter_count=chapter_count,
         )
 
 
@@ -128,7 +146,11 @@ class SubmitDownload:
         preferences = replace(await self._settings.get(command.user_id), quality="best")
         if command.document_mode is not None:
             preferences = replace(preferences, document_mode=command.document_mode)
-        preferences = replace(preferences, include_playlist=command.include_playlist)
+        preferences = replace(
+            preferences,
+            include_playlist=command.include_playlist,
+            split_chapters=command.split_chapters,
+        )
         variant = preferences.cache_variant(audio_only=command.audio_only)
         dedupe_key = hashlib.sha256(
             f"{command.user_id}\0{url}\0{variant}\0{dedupe_scope or ''}".encode()
@@ -301,6 +323,7 @@ class CreateSelection:
         source_message_id: int | None = None,
         business_connection_id: str | None = None,
         mode_override: SelectionMode | None = None,
+        chapter_count: int = 0,
     ) -> SelectionRequest:
         if not urls:
             raise ValueError("selection requires at least one URL")
@@ -336,6 +359,7 @@ class CreateSelection:
                 created_at=now,
                 expires_at=now + timedelta(minutes=15),
                 playlist_scope=playlist_scope,
+                chapter_count=chapter_count,
                 job_kind=kind,
             )
         )
@@ -382,6 +406,12 @@ class UpdateSelection:
         changes: dict[str, object]
         if action == "mode" and value in {item.value for item in SelectionMode}:
             requested = SelectionMode(value)
+            if requested is SelectionMode.SPLIT and (
+                selection.chapter_count < 2
+                or len(selection.platforms) != 1
+                or selection.platforms[0].value != "youtube"
+            ):
+                raise ValueError("selection has no splittable YouTube chapters")
             changes = {"mode": _allowed_mode(requested, selection.platforms)}
         elif action == "quality":
             # Gracefully retire callbacks from selection cards created before
@@ -436,8 +466,11 @@ class ConfirmSelection:
         if selection.playlist_scope is PlaylistScope.ASK:
             await self._selections.release_claim(token, user_id, now)
             return await self._selections.get(token), None, False
-        audio_only = selection.mode is SelectionMode.AUDIO
-        document_mode = selection.delivery is DeliveryMode.FILE
+        audio_only = selection.mode in {SelectionMode.AUDIO, SelectionMode.SPLIT}
+        split_chapters = selection.mode is SelectionMode.SPLIT
+        document_mode = (
+            selection.delivery is DeliveryMode.FILE and not split_chapters
+        )
         include_playlist = selection.playlist_scope is PlaylistScope.PLAYLIST
         try:
             if len(selection.urls) > 1:
@@ -468,6 +501,7 @@ class ConfirmSelection:
                         include_playlist=include_playlist,
                         status_message_id=selection.status_message_id,
                         inline_message_id=inline_message_id,
+                        split_chapters=split_chapters,
                     )
                 )
         except Exception:
@@ -512,6 +546,7 @@ class RetryInFormat:
             document_mode = True
         elif action != "retry":
             return None
+        split_chapters = source.preferences.split_chapters and action == "retry"
         job, _ = await self._submit.execute(
             SubmitDownloadCommand(
                 user_id=source.user_id,
@@ -526,6 +561,7 @@ class RetryInFormat:
                 quality="best",
                 document_mode=document_mode,
                 include_playlist=source.preferences.include_playlist,
+                split_chapters=split_chapters,
             )
         )
         await self._analytics.record(

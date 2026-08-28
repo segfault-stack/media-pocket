@@ -11,10 +11,12 @@ import pytest
 from downloader_bot.__main__ import download_hitmoz
 from downloader_bot.domain import (
     DeliveryMode,
+    DownloadArtifact,
     ErrorCode,
     Job,
     JobStage,
     MediaAsset,
+    MediaChapter,
     MediaKind,
     MediaPost,
     Platform,
@@ -49,6 +51,7 @@ from downloader_bot.infrastructure.download import (
     _download_headers,
     _is_telegram_compatible_video,
     _next_chunk,
+    _split_audio_chapter,
     _suffix,
     _total_size,
     _transcode_audio,
@@ -482,6 +485,140 @@ async def test_merged_provider_download_pipes_to_telegram_mp4(
     assert "aac" in commands[1]
     assert "-shortest" in commands[1]
     assert not tuple(tmp_path.glob("*.ytdlp.*"))
+
+
+@pytest.mark.asyncio
+async def test_chapter_split_downloads_once_and_removes_full_album(
+    monkeypatch, tmp_path
+) -> None:
+    downloads = 0
+    split_titles = []
+
+    async def download_source(
+        _self, _post, job, _asset, _item, directory, _progress, _cancellation
+    ):
+        nonlocal downloads
+        downloads += 1
+        source = directory / "full-album.m4a"
+        source.write_bytes(b"full album")
+        return DownloadArtifact(
+            source,
+            MediaKind.AUDIO,
+            source.stat().st_size,
+            "source",
+            "audio/mp4",
+            author="Artist",
+        )
+
+    async def split(
+        source,
+        chapter,
+        index,
+        author,
+        thumbnail_path,
+        _max_file_size,
+        _cancellation,
+    ):
+        assert source.name == "full-album.m4a"
+        assert author == "Artist" and thumbnail_path is None
+        split_titles.append(chapter.title)
+        target = source.with_name(f"{index:03d}.m4a")
+        target.write_bytes(chapter.title.encode())
+        return DownloadArtifact(
+            target,
+            MediaKind.AUDIO,
+            target.stat().st_size,
+            str(index),
+            "audio/mp4",
+            title=chapter.title,
+            author=author,
+            duration_ms=chapter.end_ms - chapter.start_ms,
+        )
+
+    monkeypatch.setattr(
+        HttpDownloadEngine, "_download_asset_with_fallback", download_source
+    )
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._split_audio_chapter", split
+    )
+    post = MediaPost(
+        "https://youtube.com/watch?v=album",
+        Platform.YOUTUBE,
+        (MediaAsset("https://cdn.example/audio.m4a", MediaKind.AUDIO),),
+        chapters=(
+            MediaChapter("01: Intro", 0, 60_000),
+            MediaChapter("02: Finale", 60_000, 120_000),
+        ),
+    )
+    job = Job(
+        "chapter-job",
+        1,
+        1,
+        post.source_url,
+        "key",
+        audio_only=True,
+        preferences=UserPreferences(split_chapters=True),
+    )
+    async with httpx.AsyncClient() as client:
+        artifacts = await HttpDownloadEngine(client, tmp_path).download(
+            post,
+            job,
+            lambda _progress: asyncio.sleep(0),
+            Cancellation(),
+        )
+    assert downloads == 1
+    assert split_titles == ["01: Intro", "02: Finale"]
+    assert tuple(item.title for item in artifacts) == tuple(split_titles)
+    assert not (tmp_path / job.id / "full-album.m4a").exists()
+
+
+@pytest.mark.asyncio
+async def test_split_audio_chapter_sets_boundaries_and_track_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "album.m4a"
+    source.write_bytes(b"album")
+    command = ()
+
+    class Stderr:
+        async def read(self):
+            return b""
+
+    class Process:
+        returncode = None
+        stderr = Stderr()
+
+        async def wait(self):
+            Path(command[-1]).write_bytes(b"track")
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = -15
+
+    async def create(*args, **_kwargs):
+        nonlocal command
+        command = args
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    artifact = await _split_audio_chapter(
+        source,
+        MediaChapter("02: Track (Demo)", 69_000, 150_000),
+        2,
+        "Artist",
+        None,
+        1_000_000,
+        Cancellation(),
+    )
+    assert command[command.index("-ss") + 1] == "69.000"
+    assert command[command.index("-t") + 1] == "81.000"
+    assert "title=02: Track (Demo)" in command
+    assert "artist=Artist" in command
+    assert command[command.index("-codec") + 1] == "copy"
+    assert artifact.title == "02: Track (Demo)"
+    assert artifact.duration_ms == 81_000
+    assert Path(artifact.path).read_bytes() == b"track"
 
 
 @pytest.mark.asyncio
@@ -1130,6 +1267,7 @@ def test_database_mapping_round_trip_and_schema() -> None:
     assert _decode_selection_urls('["https://example.com/legacy"]') == (
         ("https://example.com/legacy",),
         PlaylistScope.NONE,
+        0,
     )
     encoded_urls = _encode_selection_urls(
         ("https://youtube.com/playlist?list=PL123",), PlaylistScope.PLAYLIST
@@ -1137,6 +1275,7 @@ def test_database_mapping_round_trip_and_schema() -> None:
     assert _decode_selection_urls(encoded_urls) == (
         ("https://youtube.com/playlist?list=PL123",),
         PlaylistScope.PLAYLIST,
+        0,
     )
     manifest = json.dumps(
         [

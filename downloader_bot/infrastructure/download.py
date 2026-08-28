@@ -16,6 +16,7 @@ from downloader_bot.domain import (
     ErrorCode,
     Job,
     JobStage,
+    MediaChapter,
     MediaKind,
     MediaPost,
     MediaSource,
@@ -82,12 +83,53 @@ class HttpDownloadEngine:
             for item, asset in enumerate(post.assets, 1)
         ]
         try:
-            return tuple(await asyncio.gather(*tasks))
+            artifacts = tuple(await asyncio.gather(*tasks))
+            if job.preferences.split_chapters:
+                return await self._split_chapters(
+                    post, artifacts, job, cancellation
+                )
+            return artifacts
         except BaseException:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+
+    async def _split_chapters(
+        self,
+        post: MediaPost,
+        artifacts: tuple[DownloadArtifact, ...],
+        job: Job,
+        cancellation,
+    ) -> tuple[DownloadArtifact, ...]:
+        if not job.audio_only or len(artifacts) != 1 or len(post.chapters) < 2:
+            raise DownloadError(
+                ErrorCode.UNAVAILABLE,
+                "YouTube timestamps were no longer available for splitting",
+                retryable=False,
+            )
+        source_artifact = artifacts[0]
+        source = Path(source_artifact.path)
+        created: list[DownloadArtifact] = []
+        try:
+            for index, chapter in enumerate(post.chapters, 1):
+                created.append(
+                    await _split_audio_chapter(
+                        source,
+                        chapter,
+                        index,
+                        source_artifact.author,
+                        source_artifact.thumbnail_path,
+                        self._max_file_size,
+                        cancellation,
+                    )
+                )
+        except BaseException:
+            for artifact in created:
+                Path(artifact.path).unlink(missing_ok=True)
+            raise
+        source.unlink(missing_ok=True)
+        return tuple(created)
 
     async def _download_asset_with_fallback(
         self, post, job: Job, asset, item: int, directory: Path, progress, cancellation
@@ -1086,6 +1128,93 @@ async def _download_hls(
         partial.unlink(missing_ok=True)
         raise DownloadError(ErrorCode.TOO_LARGE, "Media exceeds the configured size limit")
     partial.replace(target)
+
+
+async def _split_audio_chapter(
+    source: Path,
+    chapter: MediaChapter,
+    index: int,
+    author: str | None,
+    thumbnail_path: PurePosixPath | None,
+    max_file_size: int,
+    cancellation,
+) -> DownloadArtifact:
+    filename = build_audio_filename(chapter.title, author, suffix=source.suffix)
+    target = source.with_name(f"{index:03d}-{filename}")
+    container_args = (
+        ("-movflags", "+faststart")
+        if target.suffix.lower() in {".m4a", ".mp4"}
+        else ()
+    )
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{chapter.start_ms / 1_000:.3f}",
+        "-i",
+        str(source),
+        "-t",
+        f"{(chapter.end_ms - chapter.start_ms) / 1_000:.3f}",
+        "-map",
+        "0:a:0",
+        "-map",
+        "0:v:0?",
+        "-codec",
+        "copy",
+        "-map_metadata",
+        "0",
+        "-metadata",
+        f"title={chapter.title}",
+        "-metadata",
+        f"artist={author or ''}",
+        *container_args,
+        str(target),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    while process.returncode is None:
+        if await cancellation.requested():
+            process.terminate()
+            await process.wait()
+            target.unlink(missing_ok=True)
+            raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+        try:
+            await asyncio.wait_for(process.wait(), timeout=0.25)
+        except TimeoutError:
+            continue
+    if process.returncode:
+        detail = (
+            (await process.stderr.read()).decode(errors="replace")[-1_000:]
+            if process.stderr is not None
+            else ""
+        )
+        target.unlink(missing_ok=True)
+        raise DownloadError(
+            ErrorCode.PROVIDER_FAILURE,
+            detail or "Chapter splitting failed",
+            retryable=False,
+        )
+    size = target.stat().st_size
+    if size > max_file_size:
+        target.unlink(missing_ok=True)
+        raise DownloadError(
+            ErrorCode.TOO_LARGE, "Prepared chapter exceeds the configured size limit"
+        )
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return DownloadArtifact(
+        path=PurePosixPath(target),
+        kind=MediaKind.AUDIO,
+        size=size,
+        checksum=digest.hexdigest(),
+        mime_type=mimetypes.guess_type(target.name)[0],
+        title=chapter.title,
+        author=author,
+        duration_ms=chapter.end_ms - chapter.start_ms,
+        thumbnail_path=thumbnail_path,
+    )
 
 
 async def _transcode_audio(

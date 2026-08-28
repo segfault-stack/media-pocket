@@ -39,7 +39,7 @@ The bot and workers run as separate processes. PostgreSQL stores canonical state
 
 | Category | Sources | Available handling |
 | --- | --- | --- |
-| Video | YouTube | video, audio, playlists, automatic compatible formats, per-user mode |
+| Video | YouTube | video, audio, playlists, timestamped-album splitting, automatic compatible formats, per-user mode |
 | Social | TikTok, Instagram, X / Twitter, Threads, Pinterest | media-first delivery, audio extraction, files, provider collections |
 | Audio | Spotify, SoundCloud, Zaycev.net, HitMoz | tracks, collections where supported, native Spotify audio or fallback |
 | Direct media | HTTP(S) audio/video URLs, direct 2ch video files | direct download; known 2ch mirrors retry automatically |
@@ -59,6 +59,8 @@ For in-chat playback, Media Pocket prefers source H.264/AAC video and M4A/AAC or
 4. **Deliver** — send only the file or media group, remove the technical status after success, and keep optional actions in a separate message.
 
 Ordinary links start immediately. YouTube can be configured per user as **Video**, **Audio**, or **Always ask**; only **Always ask** opens the 15-minute format card. A YouTube URL containing a playlist always asks whether to download the current video or the entire playlist before anything is queued. Explicit `/audio URL`, `/video URL`, `!a`, `!audio`, `!mp3`, and `!music` still override the saved format, but they do not bypass the playlist-scope choice.
+
+A single YouTube video with at least two usable description timestamps pauses before download and offers **Split into tracks** or the ordinary whole-video/audio path. Splitting downloads the audio once, cuts it at the detected boundaries without re-encoding compatible audio, preserves track order, titles, performer, durations, and cover art, then delivers the tracks in Telegram media groups.
 
 For batches, each link keeps its provider-native mode. If a batch contains YouTube and **Always ask** is enabled, one choice applies to the batch, with the nearest valid fallback for incompatible items.
 

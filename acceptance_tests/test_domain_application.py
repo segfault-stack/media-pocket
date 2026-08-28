@@ -40,6 +40,7 @@ from downloader_bot.domain import (
     JobKind,
     JobStage,
     MediaAsset,
+    MediaChapter,
     MediaKind,
     MediaPost,
     Platform,
@@ -358,8 +359,17 @@ async def test_submit_dedupes_same_variant_but_not_audio() -> None:
     audio, audio_created = await submit.execute(
         SubmitDownloadCommand(1, 1, "https://example.com/x", audio_only=True)
     )
-    assert created and not duplicate_created and audio_created
-    assert first.id == duplicate.id and audio.id != first.id
+    split, split_created = await submit.execute(
+        SubmitDownloadCommand(
+            1,
+            1,
+            "https://example.com/x",
+            audio_only=True,
+            split_chapters=True,
+        )
+    )
+    assert created and not duplicate_created and audio_created and split_created
+    assert first.id == duplicate.id and len({first.id, audio.id, split.id}) == 3
 
 
 @pytest.mark.asyncio
@@ -434,6 +444,37 @@ async def test_youtube_ask_plan_only_asks_when_youtube_is_present() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submission_plan_detects_single_youtube_album_chapters() -> None:
+    class ChapterAdapter:
+        platform = Platform.YOUTUBE
+
+        async def resolve(
+            self, url, preferences, *, audio_only=False, cancellation=None
+        ):
+            del preferences, cancellation
+            assert url.endswith("album") and audio_only
+            return MediaPost(
+                url,
+                Platform.YOUTUBE,
+                (MediaAsset("https://cdn.example/audio.m4a", MediaKind.AUDIO),),
+                chapters=(
+                    MediaChapter("01: Intro", 0, 60_000),
+                    MediaChapter("02: Finale", 60_000, 120_000),
+                ),
+            )
+
+    class ChapterRegistry:
+        def detect(self, _url):
+            return ChapterAdapter()
+
+    plan = await PlanSubmission(Settings(), ChapterRegistry()).execute(
+        1, ("https://youtube.com/watch?v=album",)
+    )
+    assert plan.chapter_count == 2
+    assert plan.audio_only_by_url == (False,)
+
+
+@pytest.mark.asyncio
 async def test_batch_keeps_duplicate_urls_scoped_to_the_same_parent() -> None:
     jobs, ids, settings = Jobs(), Ids(), Settings()
     submit = SubmitDownload(jobs, Users(), ids, Clock(), Analytics(), settings)
@@ -486,6 +527,41 @@ async def test_selection_is_persisted_updated_and_confirmed_once() -> None:
     _, duplicate, claimed_again = await confirm.execute(selection.token, 7)
     assert duplicate is None and not claimed_again
     assert analytics.events.count("download_confirmed") == 1
+
+
+@pytest.mark.asyncio
+async def test_chapter_selection_confirms_split_audio_job() -> None:
+    jobs, ids, analytics, selections = Jobs(), Ids(), Analytics(), Selections()
+    settings = Settings(UserPreferences(document_mode=True))
+    submit = SubmitDownload(jobs, Users(), ids, Clock(), analytics, settings)
+    selection = await CreateSelection(
+        selections,
+        Users(),
+        settings,
+        YoutubeRegistry(),
+        ids,
+        Clock(),
+        analytics,
+    ).execute(
+        user_id=7,
+        chat_id=8,
+        urls=("https://youtube.com/watch?v=album",),
+        chapter_count=13,
+    )
+    updated = await UpdateSelection(selections, Clock(), analytics).execute(
+        selection.token, 7, action="mode", value="split"
+    )
+    assert updated and updated.mode is SelectionMode.SPLIT
+    _, job, claimed = await ConfirmSelection(
+        selections,
+        submit,
+        SubmitBatch(submit, jobs, ids, Clock(), settings),
+        Clock(),
+        analytics,
+    ).execute(selection.token, 7)
+    assert claimed and job and job.audio_only
+    assert job.preferences.split_chapters
+    assert not job.preferences.document_mode
 
 
 @pytest.mark.asyncio

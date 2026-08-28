@@ -1028,7 +1028,7 @@ def _selection_values(selection: SelectionRequest) -> dict[str, object]:
         "user_id": selection.user_id,
         "chat_id": selection.chat_id,
         "urls_json": _encode_selection_urls(
-            selection.urls, selection.playlist_scope
+            selection.urls, selection.playlist_scope, selection.chapter_count
         ),
         "platforms_json": json.dumps([item.value for item in selection.platforms]),
         "mode": selection.mode.value,
@@ -1046,7 +1046,7 @@ def _selection_values(selection: SelectionRequest) -> dict[str, object]:
 
 
 def _selection(row: SelectionRow) -> SelectionRequest:
-    urls, playlist_scope = _decode_selection_urls(row.urls_json)
+    urls, playlist_scope, chapter_count = _decode_selection_urls(row.urls_json)
     return SelectionRequest(
         token=row.token,
         user_id=row.user_id,
@@ -1057,6 +1057,7 @@ def _selection(row: SelectionRow) -> SelectionRequest:
         quality=row.quality,
         delivery=DeliveryMode(row.delivery),
         playlist_scope=playlist_scope,
+        chapter_count=chapter_count,
         job_kind=JobKind(row.job_kind),
         source_message_id=row.source_message_id,
         status_message_id=row.status_message_id,
@@ -1069,20 +1070,28 @@ def _selection(row: SelectionRow) -> SelectionRequest:
 
 
 def _encode_selection_urls(
-    urls: tuple[str, ...], playlist_scope: PlaylistScope
+    urls: tuple[str, ...], playlist_scope: PlaylistScope, chapter_count: int = 0
 ) -> str:
     return json.dumps(
-        {"urls": urls, "playlist_scope": playlist_scope.value}, sort_keys=True
+        {
+            "urls": urls,
+            "playlist_scope": playlist_scope.value,
+            "chapter_count": chapter_count,
+        },
+        sort_keys=True,
     )
 
 
-def _decode_selection_urls(value: str) -> tuple[tuple[str, ...], PlaylistScope]:
+def _decode_selection_urls(
+    value: str,
+) -> tuple[tuple[str, ...], PlaylistScope, int]:
     data = json.loads(value)
     if isinstance(data, list):
-        return tuple(str(item) for item in data), PlaylistScope.NONE
+        return tuple(str(item) for item in data), PlaylistScope.NONE, 0
     return (
         tuple(str(item) for item in data.get("urls", ())),
         PlaylistScope(data.get("playlist_scope", PlaylistScope.NONE.value)),
+        max(0, int(data.get("chapter_count", 0))),
     )
 
 

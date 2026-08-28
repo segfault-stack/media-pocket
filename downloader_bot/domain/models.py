@@ -78,6 +78,7 @@ class SelectionMode(StrEnum):
     VIDEO = "video"
     AUDIO = "audio"
     MEDIA = "media"
+    SPLIT = "split"
 
 
 class DeliveryMode(StrEnum):
@@ -174,6 +175,19 @@ class MediaAsset:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaChapter:
+    title: str
+    start_ms: int
+    end_ms: int
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError("chapter title is required")
+        if self.start_ms < 0 or self.end_ms <= self.start_ms:
+            raise ValueError("chapter boundaries must be increasing")
+
+
+@dataclass(frozen=True, slots=True)
 class MediaPost:
     source_url: str
     platform: Platform
@@ -181,6 +195,7 @@ class MediaPost:
     title: str | None = None
     author: str | None = None
     caption: str | None = None
+    chapters: tuple[MediaChapter, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,17 +223,17 @@ class UserPreferences:
     compact_progress: bool = False
     include_playlist: bool = False
     youtube_mode: str = "video"
+    split_chapters: bool = False
 
     def cache_variant(self, *, audio_only: bool = False) -> str:
-        return ":".join(
-            (
-                "audio" if audio_only else "media",
-                "automatic",
-                "m4a" if audio_only else "mp4",
-                "document" if self.document_mode else "native",
-                "playlist" if self.include_playlist else "single",
-            )
+        parts = (
+            "audio" if audio_only else "media",
+            "automatic",
+            "m4a" if audio_only else "mp4",
+            "document" if self.document_mode else "native",
+            "playlist" if self.include_playlist else "single",
         )
+        return ":".join((*parts, "chapters") if self.split_chapters else parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +318,7 @@ class SelectionRequest:
     created_at: datetime
     expires_at: datetime
     playlist_scope: PlaylistScope = PlaylistScope.NONE
+    chapter_count: int = 0
     job_kind: JobKind = JobKind.DIRECT
     source_message_id: int | None = None
     status_message_id: int | None = None
