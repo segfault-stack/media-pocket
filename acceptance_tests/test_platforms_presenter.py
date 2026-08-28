@@ -516,9 +516,9 @@ async def test_ytdlp_repairs_description_chapters_and_keeps_parentheses(
         audio_only=True,
     )
     assert tuple(chapter.title for chapter in post.chapters) == (
-        "01: Intro",
-        "02: Track (Studio Outtake)",
-        "03: Finale",
+        "Intro",
+        "Track (Studio Outtake)",
+        "Finale",
     )
     assert tuple(
         (chapter.start_ms, chapter.end_ms) for chapter in post.chapters

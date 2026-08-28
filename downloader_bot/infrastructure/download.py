@@ -118,10 +118,12 @@ class HttpDownloadEngine:
                         source,
                         chapter,
                         index,
-                        source_artifact.author,
+                        chapter.author or source_artifact.author,
                         source_artifact.thumbnail_path,
                         self._max_file_size,
                         cancellation,
+                        album=post.title,
+                        track_count=len(post.chapters),
                     )
                 )
         except BaseException:
@@ -1138,6 +1140,9 @@ async def _split_audio_chapter(
     thumbnail_path: PurePosixPath | None,
     max_file_size: int,
     cancellation,
+    *,
+    album: str | None = None,
+    track_count: int | None = None,
 ) -> DownloadArtifact:
     filename = build_audio_filename(chapter.title, author, suffix=source.suffix)
     target = source.with_name(f"{index:03d}-{filename}")
@@ -1167,6 +1172,10 @@ async def _split_audio_chapter(
         f"title={chapter.title}",
         "-metadata",
         f"artist={author or ''}",
+        "-metadata",
+        f"album={album or ''}",
+        "-metadata",
+        f"track={index}/{track_count or index}",
         *container_args,
         str(target),
         stdout=asyncio.subprocess.DEVNULL,

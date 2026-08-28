@@ -34,6 +34,7 @@ from downloader_bot.domain.audio_names import (
 )
 from downloader_bot.domain.errors import DownloadError
 from downloader_bot.domain.models import ErrorCode
+from downloader_bot.domain.youtube_metadata import resolve_youtube_album_metadata
 from downloader_bot.infrastructure.cookies import writable_cookie_file
 
 PLATFORM_DOMAINS: dict[Platform, tuple[str, ...]] = {
@@ -295,14 +296,28 @@ class YtDlpPlatformAdapter:
         if not assets:
             raise DownloadError(ErrorCode.UNAVAILABLE, "No downloadable media found")
         chapter_source = entries[0] if len(entries) == 1 else data
+        chapters = _media_chapters(chapter_source)
+        post_title = data.get("title")
+        post_author = data.get("uploader") or data.get("artist")
+        if self.platform is Platform.YOUTUBE and len(chapters) >= 2:
+            album = resolve_youtube_album_metadata(chapter_source, chapters)
+            chapters = album.chapters
+            post_title = album.title
+            post_author = album.author
+            assets = tuple(
+                replace(asset, title=album.title, author=album.asset_author)
+                if asset.kind is MediaKind.AUDIO
+                else asset
+                for asset in assets
+            )
         return MediaPost(
             source_url=source_url,
             platform=self.platform,
             assets=assets,
-            title=data.get("title"),
-            author=data.get("uploader") or data.get("artist"),
+            title=post_title,
+            author=post_author,
             caption=data.get("description"),
-            chapters=_media_chapters(chapter_source),
+            chapters=chapters,
         )
 
     @staticmethod

@@ -518,9 +518,13 @@ async def test_chapter_split_downloads_once_and_removes_full_album(
         thumbnail_path,
         _max_file_size,
         _cancellation,
+        *,
+        album,
+        track_count,
     ):
         assert source.name == "full-album.m4a"
         assert author == "Artist" and thumbnail_path is None
+        assert album is None and track_count == 2
         split_titles.append(chapter.title)
         target = source.with_name(f"{index:03d}.m4a")
         target.write_bytes(chapter.title.encode())
@@ -610,11 +614,15 @@ async def test_split_audio_chapter_sets_boundaries_and_track_metadata(
         None,
         1_000_000,
         Cancellation(),
+        album="Album",
+        track_count=7,
     )
     assert command[command.index("-ss") + 1] == "69.000"
     assert command[command.index("-t") + 1] == "81.000"
     assert "title=02: Track (Demo)" in command
     assert "artist=Artist" in command
+    assert "album=Album" in command
+    assert "track=2/7" in command
     assert command[command.index("-codec") + 1] == "copy"
     assert artifact.title == "02: Track (Demo)"
     assert artifact.duration_ms == 81_000

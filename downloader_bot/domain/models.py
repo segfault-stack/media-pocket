@@ -179,6 +179,7 @@ class MediaChapter:
     title: str
     start_ms: int
     end_ms: int
+    author: str | None = None
 
     def __post_init__(self) -> None:
         if not self.title.strip():
