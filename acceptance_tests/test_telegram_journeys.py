@@ -64,6 +64,11 @@ class Gateway:
     def __init__(self) -> None:
         self.status = []
         self.deleted = []
+        self.waiting = []
+
+    async def show_waiting(self, chat_id, business_connection_id=None):
+        self.waiting.append((chat_id, business_connection_id))
+        return 88
 
     async def show_status(self, job, progress):
         self.status.append((job, progress))
@@ -112,6 +117,7 @@ class SelectionGateway(Gateway):
 
     async def update_selection(self, selection):
         self.updated.append(selection)
+        self.selections.append(selection)
 
 
 class SelectionActions:
@@ -230,6 +236,46 @@ def make_router():
 
 
 @pytest.mark.asyncio
+async def test_link_is_acknowledged_before_provider_preflight() -> None:
+    submit, batch, gateway = Submit(), Batch(), Gateway()
+    stub = Stub()
+
+    class Planner:
+        async def execute(self, _user_id, _urls):
+            assert gateway.waiting == [(2, None)]
+            return SimpleNamespace(
+                audio_only_by_url=(False,),
+                ask_for_youtube=False,
+                chapter_count=0,
+            )
+
+    router = build_router(
+        submit,
+        batch,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        stub,
+        gateway,
+        Jobs(),
+        plan_submission=Planner(),
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        chat=SimpleNamespace(id=2, type=ChatType.PRIVATE),
+        text="https://youtube.com/watch?v=x",
+        message_id=3,
+        business_connection_id=None,
+    )
+
+    await handler(router, "message", "links")(message)
+
+    assert submit.commands[-1].status_message_id == 88
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("chat_type", "business_id", "kind"),
     [
@@ -342,7 +388,7 @@ async def test_plain_youtube_link_starts_video_unless_user_always_asks() -> None
     await handler(ask_router, "message", "links")(
         SimpleNamespace(**base, text="https://youtube.com/watch?v=ask")
     )
-    assert gateway.selections and create.bound[-1][-1] == 77
+    assert gateway.selections and create.bound[-1][-1] == 88
 
     await links(SimpleNamespace(**base, text="/video https://youtube.com/watch?v=x"))
     assert submit.commands[-1].audio_only is False

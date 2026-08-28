@@ -87,6 +87,7 @@ FAST_VIDEO_HINT = (
     "Add a link after the command, for example:\n"
     "<code>/video https://example.com/media</code>"
 )
+LINK_RECEIVED_TEXT = "<b>⏳ Link received</b>\nChecking media details…"
 AUTO_DELETE_WARNING = (
     "⚠️ I couldn’t delete the source message. Give me permission to delete messages "
     "in this chat, or turn off source cleanup in Settings."

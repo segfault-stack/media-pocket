@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import timedelta
 
 from aiogram import F, Router
@@ -414,6 +415,9 @@ def build_router(
             if message.chat.type != ChatType.PRIVATE
             else JobKind.DIRECT
         )
+        waiting_id = await gateway.show_waiting(
+            message.chat.id, business_connection_id
+        )
         plan = None
         if plan_submission is not None:
             plan = await plan_submission.execute(message.from_user.id, urls)
@@ -444,9 +448,11 @@ def build_router(
                 else None,
                 chapter_count=plan.chapter_count if plan is not None else 0,
             )
-            status_id = await gateway.show_selection(selection)
-            await create_selection.bind_message(
-                selection.token, message.from_user.id, status_id
+            bound = await create_selection.bind_message(
+                selection.token, message.from_user.id, waiting_id
+            )
+            await gateway.update_selection(
+                bound or replace(selection, status_message_id=waiting_id)
             )
             await _delete_source_if_enabled(message, settings, gateway)
             return
@@ -459,6 +465,7 @@ def build_router(
             submit_batch,
             gateway,
             jobs,
+            status_message_id=waiting_id,
             audio_only_by_url=plan.audio_only_by_url
             if plan is not None and not audio_only and not video_only
             else None,
@@ -750,6 +757,7 @@ async def _submit_fast(
     gateway,
     jobs,
     *,
+    status_message_id=None,
     audio_only_by_url=None,
 ) -> None:
     kind = (
@@ -768,6 +776,7 @@ async def _submit_fast(
             business_connection_id=business_connection_id,
             audio_only=audio_only,
             audio_only_by_url=audio_only_by_url,
+            status_message_id=status_message_id,
         )
     else:
         job, _ = await submit.execute(
@@ -781,6 +790,7 @@ async def _submit_fast(
                 audio_only=audio_only_by_url[0]
                 if audio_only_by_url is not None
                 else audio_only,
+                status_message_id=status_message_id,
             )
         )
     status_id = await gateway.show_status(

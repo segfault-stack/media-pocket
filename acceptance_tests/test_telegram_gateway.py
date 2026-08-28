@@ -21,6 +21,7 @@ from downloader_bot.adapters.telegram.gateway import (
     _source_keyboard,
     _status_keyboard,
 )
+from downloader_bot.adapters.telegram.presenter import LINK_RECEIVED_TEXT
 from downloader_bot.domain import (
     DownloadArtifact,
     Job,
@@ -50,6 +51,22 @@ def artifact(path, kind):
 def assert_uuid_filename(filename: str, suffix: str) -> None:
     assert filename.endswith(suffix)
     UUID(filename.removesuffix(suffix))
+
+
+@pytest.mark.asyncio
+async def test_gateway_sends_immediate_waiting_status() -> None:
+    bot = Bot()
+    gateway = AiogramTelegramGateway(bot)
+
+    assert await gateway.show_waiting(2, "business") == 77
+
+    assert bot.calls == [
+        (
+            "send_message",
+            (2, LINK_RECEIVED_TEXT),
+            {"business_connection_id": "business"},
+        )
+    ]
 
 
 @pytest.mark.asyncio

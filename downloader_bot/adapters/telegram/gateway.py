@@ -34,6 +34,7 @@ from .presenter import (
     INLINE_FALLBACK_TEXT,
     INLINE_OPEN_PRIVATE_TEXT,
     INLINE_SENT_TEXT,
+    LINK_RECEIVED_TEXT,
     MANUAL_RETRY_TEXT,
     RESULT_ACTIONS_TEXT,
     failure_keyboard,
@@ -50,6 +51,18 @@ class AiogramTelegramGateway:
         self._bot = bot
         self._bot_username = (bot_username or "").lstrip("@")
         self._delete_warnings: set[int] = set()
+
+    async def show_waiting(
+        self,
+        chat_id: int,
+        business_connection_id: str | None = None,
+    ) -> int:
+        message = await self._bot.send_message(
+            chat_id,
+            LINK_RECEIVED_TEXT,
+            business_connection_id=business_connection_id,
+        )
+        return message.message_id
 
     async def show_selection(self, selection: SelectionRequest) -> int:
         message = await self._bot.send_message(
