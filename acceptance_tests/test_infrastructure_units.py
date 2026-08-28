@@ -381,7 +381,7 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
             MediaAsset(
                 "https://googlevideo.example/audio",
                 MediaKind.AUDIO,
-                title="Track",
+                title="Track [REMASTERED]",
                 author="Artist",
                 extractor_url="https://youtube.com/watch?v=x",
                 format_selector="bestaudio/best",
@@ -394,7 +394,7 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
             report,
             Cancellation(),
         )
-    assert output.name == "Artist - Track.webm"
+    assert output.name == "Artist - Track [REMASTERED].webm"
     assert output.read_bytes() == b"audio"
     assert "youtube:player_client=mweb" in command
     assert "youtubepot-bgutilhttp:base_url=http://youtube-pot-provider:4416" in command

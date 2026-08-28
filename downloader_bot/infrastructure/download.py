@@ -414,10 +414,11 @@ class HttpDownloadEngine:
                 )
         candidates = tuple(
             path
-            for path in directory.glob(f"{readable.stem}.ytdlp.*")
+            for path in _ytdlp_output_files(output_template)
             if path.is_file() and not path.name.endswith((".part", ".ytdl"))
         )
         if not candidates:
+            _cleanup_ytdlp_files(output_template)
             raise DownloadError(ErrorCode.UNAVAILABLE, "yt-dlp produced no media")
         target = max(candidates, key=lambda path: path.stat().st_mtime_ns)
         if target.stat().st_size > self._max_file_size:
@@ -997,9 +998,17 @@ def _positive_int(value: object, *, allow_zero: bool = False) -> int | None:
 
 
 def _cleanup_ytdlp_files(output_template: Path) -> None:
-    pattern = output_template.name.replace("%(ext)s", "*")
-    for path in output_template.parent.glob(pattern):
+    for path in _ytdlp_output_files(output_template):
         path.unlink(missing_ok=True)
+
+
+def _ytdlp_output_files(output_template: Path) -> tuple[Path, ...]:
+    prefix, suffix = output_template.name.split("%(ext)s", 1)
+    return tuple(
+        path
+        for path in output_template.parent.iterdir()
+        if path.name.startswith(prefix) and path.name.endswith(suffix)
+    )
 
 
 def _download_headers(post: MediaPost, media_url: str | None = None) -> dict[str, str]:
