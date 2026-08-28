@@ -51,7 +51,7 @@
 ## Pinned playbook
 
 - Upstream: `https://github.com/segfault-stack/oss-agent-playbook`
-- Immutable ref: `v0.4.1`
-- Resolved commit: `6ac968f8251b15ee78454fdd1d4358a23d2f71da`
+- Immutable ref: `v0.4.4`
+- Resolved commit: `ef9281d1f1ff38fdb99a5b5b2d1248c088b4c1fa`
 - Import method: `git submodule`
-- Imported or last reviewed: `2026-08-25`
+- Imported or last reviewed: `2026-08-26`

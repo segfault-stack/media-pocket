@@ -185,7 +185,7 @@ async def test_force_audio_changes_video_artifact_kind_and_keeps_metadata(
     async def transcode(source, _cancellation, **metadata):
         assert callable(metadata.pop("report"))
         assert metadata.pop("strategy") == "transcode"
-        assert metadata == {"title": "Track", "author": "Artist"}
+        assert metadata == {"title": "Track", "author": "Artist", "cover": None}
         output = source.with_suffix(".m4a")
         source.replace(output)
         return output
@@ -406,6 +406,82 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
     assert events[-1].eta_seconds == 2
     assert "--progress-template" in command
     assert "--ignore-config" in command
+
+
+@pytest.mark.asyncio
+async def test_merged_provider_download_pipes_to_telegram_mp4(
+    monkeypatch, tmp_path
+) -> None:
+    commands = []
+
+    class Reader:
+        def __init__(self, chunks=()) -> None:
+            self.chunks = list(chunks)
+
+        async def read(self, _size=-1):
+            return self.chunks.pop(0) if self.chunks else b""
+
+    class Writer:
+        def __init__(self) -> None:
+            self.content = bytearray()
+
+        def write(self, chunk):
+            self.content.extend(chunk)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, *, stdout=None, stdin=None) -> None:
+            self.stdout = stdout
+            self.stdin = stdin
+            self.stderr = Reader()
+
+        async def wait(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+    async def create(*args, **_kwargs):
+        commands.append(args)
+        if args[0] == "ffmpeg":
+            Path(args[-1]).write_bytes(b"telegram mp4")
+            return Process(stdin=Writer())
+        return Process(stdout=Reader((b"merged transport stream",)))
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    events = []
+    async with httpx.AsyncClient() as client:
+        output = await HttpDownloadEngine(client, tmp_path)._download_merged_with_pipe(
+            MediaAsset(
+                "https://provider.example/post/x",
+                MediaKind.VIDEO,
+                extractor_url="https://provider.example/post/x",
+                format_selector="bestvideo+bestaudio/best",
+                requires_extractor_download=True,
+            ),
+            Job("job", 1, 1, "https://provider.example/post/x", "key"),
+            1,
+            1,
+            tmp_path,
+            events.append,
+            Cancellation(),
+        )
+
+    assert output.name == "000.mp4"
+    assert output.read_bytes() == b"telegram mp4"
+    assert commands[0][commands[0].index("--output") + 1] == "-"
+    assert commands[1][0] == "ffmpeg"
+    assert "libx264" in commands[1]
+    assert "aac" in commands[1]
+    assert "-shortest" in commands[1]
+    assert not tuple(tmp_path.glob("*.ytdlp.*"))
 
 
 @pytest.mark.asyncio
@@ -684,6 +760,47 @@ async def test_audio_transcode_subprocess_success_failure_and_cancel(
         await _transcode_audio(
             source, Cancellation(True), strategy="transcode"
         )
+
+
+@pytest.mark.asyncio
+async def test_audio_transcode_embeds_cover_art(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source.m4a"
+    source.write_bytes(b"audio")
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"jpeg")
+    command = ()
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            Path(command[-1]).write_bytes(b"tagged audio")
+            self.returncode = 0
+            return 0
+
+    async def create(*args, **_kwargs):
+        nonlocal command
+        command = args
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    output = await _transcode_audio(
+        source,
+        Cancellation(),
+        title="Track",
+        author="Artist",
+        cover=cover,
+        strategy="passthrough",
+    )
+
+    assert output == source
+    assert output.read_bytes() == b"tagged audio"
+    assert command[command.index("-i", 4) + 1] == str(cover)
+    assert command[command.index("-map", 6) + 1] == "0:a:0"
+    assert "1:v:0" in command
+    assert "attached_pic" in command
+    assert "-vn" not in command
 
 
 @pytest.mark.asyncio

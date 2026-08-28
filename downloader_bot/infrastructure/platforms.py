@@ -109,6 +109,7 @@ class _SpotifyTrack(TypedDict):
     title: str
     author: str | None
     duration_ms: int | None
+    thumbnail_url: str | None
 
 
 async def _communicate_ytdlp(
@@ -308,11 +309,16 @@ class YtDlpPlatformAdapter:
         force_audio: bool = False,
     ) -> MediaAsset:
         media_url = entry.get("url")
-        requested = (
-            entry.get("requested_downloads") or entry.get("requested_formats") or ()
+        requested_downloads = entry.get("requested_downloads") or ()
+        requested_formats = entry.get("requested_formats") or ()
+        requested = requested_downloads or requested_formats
+        requires_extractor_download = (
+            len(requested_downloads) > 1 or len(requested_formats) > 1
         )
         if requested and not media_url:
             media_url = requested[0].get("url")
+            if not media_url:
+                requires_extractor_download = True
         if not media_url:
             media_url = entry.get("webpage_url") or entry.get("original_url")
         if not isinstance(media_url, str):
@@ -359,7 +365,7 @@ class YtDlpPlatformAdapter:
             thumbnail_url=entry.get("thumbnail")
             if isinstance(entry.get("thumbnail"), str)
             else None,
-            requires_extractor_download=len(requested) > 1,
+            requires_extractor_download=requires_extractor_download,
         )
 
 
@@ -495,6 +501,7 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
                             title=title,
                             author=track["author"],
                             duration_ms=track["duration_ms"],
+                            thumbnail_url=track["thumbnail_url"],
                         )
                     )
             if not assets:
@@ -521,6 +528,11 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
                 ErrorCode.UNAVAILABLE, "Spotify metadata is unavailable"
             )
         author = catalog["author"] if catalog else _spotify_oembed_author(metadata)
+        thumbnail_url = (
+            catalog["thumbnail_url"] if catalog else metadata.get("thumbnail_url")
+        )
+        if not isinstance(thumbnail_url, str):
+            thumbnail_url = None
         normalized_title = normalize_audio_title(title, author)
         query = " - ".join(part for part in (author, normalized_title) if part)
         resolved = await self._resolve_target(
@@ -540,6 +552,7 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
                     title=normalized_title,
                     author=author,
                     duration_ms=catalog["duration_ms"] if catalog else None,
+                    thumbnail_url=thumbnail_url,
                 )
                 for asset in resolved.assets
             ),
@@ -578,6 +591,7 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
             "title": title,
             "author": normalize_artist_names(track.get("artists")),
             "duration_ms": duration_ms if isinstance(duration_ms, int) else None,
+            "thumbnail_url": _spotify_image_url(track.get("album")),
         }
 
     async def _resolve_native(self, url: str) -> MediaPost:
@@ -638,11 +652,12 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
         token_response.raise_for_status()
         token = token_response.json()["access_token"]
         endpoint = (
-            f"https://api.spotify.com/v1/albums/{resource_id}/tracks"
+            f"https://api.spotify.com/v1/albums/{resource_id}"
             if resource == "album"
             else f"https://api.spotify.com/v1/playlists/{resource_id}/tracks"
         )
         tracks: list[_SpotifyTrack] = []
+        collection_thumbnail_url: str | None = None
         while endpoint:
             response = await self.client.get(
                 endpoint,
@@ -651,7 +666,12 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
             )
             response.raise_for_status()
             payload = response.json()
-            for raw in payload.get("items", []):
+            if resource == "album" and "tracks" in payload:
+                collection_thumbnail_url = _spotify_image_url(payload)
+                page = payload.get("tracks") or {}
+            else:
+                page = payload
+            for raw in page.get("items", []):
                 track = raw.get("track") if resource == "playlist" else raw
                 if not isinstance(track, dict) or not track.get("name"):
                     continue
@@ -664,9 +684,11 @@ class SpotifyPlatformAdapter(YtDlpPlatformAdapter):
                         "duration_ms": duration_ms
                         if isinstance(duration_ms, int)
                         else None,
+                        "thumbnail_url": _spotify_image_url(track.get("album"))
+                        or collection_thumbnail_url,
                     }
                 )
-            endpoint = payload.get("next") or ""
+            endpoint = page.get("next") or ""
         return tuple(tracks)
 
 
@@ -961,6 +983,7 @@ def _native_spotify_asset(payload: dict, index: int) -> MediaAsset:
         raise DownloadError(ErrorCode.UNAVAILABLE, "Spotify track metadata is invalid")
     title = normalize_audio_title(title, author)
     query = f"{author} - {title}" if author else title
+    artwork_url = payload.get("artworkUrl") or payload.get("thumbnailUrl")
     return MediaAsset(
         source_url=identifier,
         kind=MediaKind.AUDIO,
@@ -970,10 +993,17 @@ def _native_spotify_asset(payload: dict, index: int) -> MediaAsset:
         duration_ms=payload.get("durationMs") if isinstance(payload.get("durationMs"), int) else None,
         source=MediaSource.SPOTIFY_STREAM,
         fallback_query=query,
-        thumbnail_url=payload.get("thumbnailUrl")
-        if isinstance(payload.get("thumbnailUrl"), str)
-        else None,
+        thumbnail_url=artwork_url if isinstance(artwork_url, str) else None,
     )
+
+
+def _spotify_image_url(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for image in payload.get("images") or ():
+        if isinstance(image, dict) and isinstance(image.get("url"), str):
+            return image["url"]
+    return None
 
 
 def _media_author(entry: dict) -> str | None:

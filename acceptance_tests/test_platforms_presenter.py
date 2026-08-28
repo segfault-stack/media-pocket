@@ -213,6 +213,38 @@ async def test_ytdlp_fixture_maps_album_assets_and_photos(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ytdlp_marks_merged_provider_formats_for_extractor_download(
+    monkeypatch,
+) -> None:
+    payload = {
+        "webpage_url": "https://provider.example/post/x",
+        "ext": "mkv",
+        "requested_downloads": [{"ext": "mkv", "protocol": "https+https"}],
+        "requested_formats": [
+            {"url": "https://cdn.example/video.mp4", "ext": "mp4"},
+            {"url": "https://cdn.example/audio.m4a", "ext": "m4a"},
+        ],
+    }
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return json.dumps(payload).encode(), b""
+
+    async def create(*_args, **_kwargs):
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    post = await YtDlpPlatformAdapter(Platform.INSTAGRAM).resolve(
+        "https://provider.example/post/x", UserPreferences()
+    )
+
+    assert post.assets[0].source_url == "https://provider.example/post/x"
+    assert post.assets[0].requires_extractor_download
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("include_playlist", "expected", "excluded"),
     [
@@ -494,7 +526,12 @@ def test_ytdlp_asset_fallbacks_and_rejects_missing_media() -> None:
 async def test_spotify_fixture_resolves_to_audio(monkeypatch) -> None:
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(
-            200, json={"title": "Track", "author_name": "Artist"}
+            200,
+            json={
+                "title": "Track",
+                "author_name": "Artist",
+                "thumbnail_url": "https://i.scdn.co/image/oembed-cover",
+            },
         )
     )
     async with httpx.AsyncClient(transport=transport) as client:
@@ -516,6 +553,7 @@ async def test_spotify_fixture_resolves_to_audio(monkeypatch) -> None:
     assert post.assets[0].kind is MediaKind.AUDIO
     assert post.assets[0].title == "Track"
     assert post.assets[0].author == "Artist"
+    assert post.assets[0].thumbnail_url == "https://i.scdn.co/image/oembed-cover"
 
 
 @pytest.mark.asyncio
@@ -535,6 +573,7 @@ async def test_spotify_track_prefers_exact_catalog_metadata(monkeypatch) -> None
                     {"name": "artist"},
                 ],
                 "duration_ms": 123_456,
+                "album": {"images": [{"url": "https://i.scdn.co/image/catalog-cover"}]},
             },
         )
 
@@ -566,6 +605,7 @@ async def test_spotify_track_prefers_exact_catalog_metadata(monkeypatch) -> None
         "Artist, Guest",
         123_456,
     )
+    assert asset.thumbnail_url == "https://i.scdn.co/image/catalog-cover"
 
 
 @pytest.mark.asyncio
@@ -603,7 +643,7 @@ async def test_spotify_native_track_keeps_youtube_fallback_query(monkeypatch) ->
 
         async def communicate(self):
             return (
-                b'{"type":"track","identifier":"spotify:track:abc","title":"Track","author":"Artist","durationMs":123000}',
+                b'{"type":"track","identifier":"spotify:track:abc","title":"Track","author":"Artist","durationMs":123000,"artworkUrl":"https://i.scdn.co/image/cover"}',
                 b"",
             )
 
@@ -618,6 +658,7 @@ async def test_spotify_native_track_keeps_youtube_fallback_query(monkeypatch) ->
     assert post.assets[0].fallback_query == "Artist - Track"
     assert post.assets[0].author == "Artist"
     assert post.assets[0].duration_ms == 123000
+    assert post.assets[0].thumbnail_url == "https://i.scdn.co/image/cover"
 
 
 @pytest.mark.asyncio
@@ -628,15 +669,18 @@ async def test_spotify_album_expands_every_track(monkeypatch) -> None:
         return httpx.Response(
             200,
             json={
-                "items": [
-                    {
-                        "name": "One",
-                        "artists": [{"name": "Artist"}],
-                        "duration_ms": 10_000,
-                    },
-                    {"name": "Two", "artists": [{"name": "Artist"}]},
-                ],
-                "next": None,
+                "images": [{"url": "https://i.scdn.co/image/album-cover"}],
+                "tracks": {
+                    "items": [
+                        {
+                            "name": "One",
+                            "artists": [{"name": "Artist"}],
+                            "duration_ms": 10_000,
+                        },
+                        {"name": "Two", "artists": [{"name": "Artist"}]},
+                    ],
+                    "next": None,
+                },
             },
         )
 
@@ -667,6 +711,7 @@ async def test_spotify_album_expands_every_track(monkeypatch) -> None:
     assert post.assets[0].title == "One"
     assert post.assets[0].author == "Artist"
     assert post.assets[0].duration_ms == 10_000
+    assert post.assets[0].thumbnail_url == "https://i.scdn.co/image/album-cover"
 
 
 @pytest.mark.asyncio
@@ -705,7 +750,17 @@ async def test_spotify_collection_maps_playlist_items_and_rate_limits() -> None:
             200,
             json={
                 "items": [
-                    {"track": {"name": "Song", "artists": [{"name": "Artist"}]}},
+                    {
+                        "track": {
+                            "name": "Song",
+                            "artists": [{"name": "Artist"}],
+                            "album": {
+                                "images": [
+                                    {"url": "https://i.scdn.co/image/playlist-track"}
+                                ]
+                            },
+                        }
+                    },
                     {"track": None},
                 ],
                 "next": None,
@@ -716,7 +771,14 @@ async def test_spotify_collection_maps_playlist_items_and_rate_limits() -> None:
         tracks = await SpotifyPlatformAdapter(
             Platform.SPOTIFY, client=client, client_id="id", client_secret="secret"
         )._collection_tracks("playlist", "x")
-    assert tracks == ({"title": "Song", "author": "Artist", "duration_ms": None},)
+    assert tracks == (
+        {
+            "title": "Song",
+            "author": "Artist",
+            "duration_ms": None,
+            "thumbnail_url": "https://i.scdn.co/image/playlist-track",
+        },
+    )
 
 
 @pytest.mark.asyncio

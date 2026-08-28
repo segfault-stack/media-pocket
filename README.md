@@ -49,7 +49,7 @@ Direct media detection uses the URL path extension, including common formats suc
 
 Video sources can offer **Video** or **Audio** and **Media** or **File** delivery where those choices apply. Media Pocket automatically selects the best practical source format and prefers native Telegram playback over expensive transcoding. **File** delivery preserves the downloaded source whenever possible. Audio-first providers expose only relevant controls.
 
-For in-chat playback, Media Pocket prefers source H.264/AAC video and M4A/AAC or MP3 audio. It remuxes compatible streams without re-encoding, converts only an incompatible stream when possible, and falls back to full conversion only when Telegram needs it. Audio includes title, performer, duration, and thumbnail metadata when the provider supplies it.
+For in-chat playback, Media Pocket prefers source H.264/AAC video and M4A/AAC or MP3 audio. It remuxes compatible streams without re-encoding, converts only an incompatible stream when possible, and falls back to full conversion only when Telegram needs it. Audio includes title, performer, duration, and thumbnail metadata when the provider supplies it; Spotify cover art is also embedded in the prepared audio file.
 
 ## 🔄 Download flow
 
