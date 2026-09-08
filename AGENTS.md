@@ -2,7 +2,7 @@
 
 ## Project Structure & Architecture
 
-Application code lives in `downloader_bot/`. Keep framework-free models in `domain/`, use cases and ports in `application/`, Telegram/provider integrations in `adapters/`, PostgreSQL, Redis, downloads, and migrations in `infrastructure/`, and process assembly in `bootstrap/`. Telegram routers should remain transport-only; reusable behavior belongs in application use cases. Network-free behavior tests live in `acceptance_tests/`, operational checks in `scripts/`, and design notes and images in `docs/`. `third_party/librespot` and `.agent/oss-playbook` are pinned submodules.
+Application code lives in `downloader_bot/`. Keep framework-free models in `domain/`, use cases and ports in `application/`, Telegram/provider integrations in `adapters/`, PostgreSQL, Redis, downloads, and migrations in `infrastructure/`, and process assembly in `bootstrap/`. Telegram routers should remain transport-only; reusable behavior belongs in application use cases. Network-free behavior tests live in `acceptance_tests/`, operational checks in `scripts/`, and design notes and images in `docs/`. `third_party/librespot` is a pinned submodule.
 
 ## Build, Test, and Development Commands
 
@@ -32,4 +32,4 @@ Recent history uses Conventional Commit prefixes such as `feat:`, `fix:`, `perf:
 
 ## Security & Agent Guidance
 
-Never commit `.env`, tokens, cookies, provider sessions, dumps, downloaded media, or logs. Do not replace persistent PostgreSQL, Redis, Telegram API, download, or Spotify volumes without explicit approval. Before repository maintenance, CI, release, security, or community work, read `PROJECT_AGENT_CONTEXT.md`, `.agent/oss-playbook/docs/principles.md`, and `.agent/oss-playbook/docs/agent-workflow.md`. If the pinned playbook is missing, stop instead of fetching a replacement. Local edits do not authorize pushes, releases, deployments, or external messages.
+Never commit `.env`, tokens, cookies, provider sessions, dumps, downloaded media, or logs. Do not replace persistent PostgreSQL, Redis, Telegram API, download, or Spotify volumes without explicit approval. Before repository maintenance, CI, release, security, or community work, read `PROJECT_AGENT_CONTEXT.md`. Local edits do not authorize pushes, releases, deployments, or external messages.
