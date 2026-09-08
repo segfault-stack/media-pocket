@@ -52,6 +52,11 @@ services:
     command: ["python", "-m", "downloader_bot", "worker"]
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
+    mem_limit: ${WORKER_MEMORY_LIMIT:-1536m}
+    mem_reservation: ${WORKER_MEMORY_RESERVATION:-512m}
+    memswap_limit: ${WORKER_MEMORY_LIMIT:-1536m}
+    cpus: ${WORKER_CPU_LIMIT:-2.0}
+    pids_limit: ${WORKER_PIDS_LIMIT:-256}
 
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
