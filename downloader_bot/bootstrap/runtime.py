@@ -31,6 +31,7 @@ async def run_bot(container: Container) -> None:
             "No administrator configured. Run: "
             "python -m downloader_bot admin add TELEGRAM_USER_ID"
         )
+    await _clear_jobs_on_start(container)
     session = AiohttpSession(
         api=TelegramAPIServer.from_base(container.settings.telegram_api_url)
     )
@@ -81,6 +82,7 @@ async def run_bot(container: Container) -> None:
         generate_invite=container.generate_invite,
         list_invites=container.list_invites,
         revoke_invite=container.revoke_invite,
+        clear_background_jobs=container.clear_background_jobs,
     )
     access = InviteAccessMiddleware(
         container.check_access, container.redeem_invite, bot_identity.username
@@ -107,6 +109,11 @@ async def run_bot(container: Container) -> None:
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
         await session.close()
+
+
+async def _clear_jobs_on_start(container: Container) -> None:
+    cleared = await container.clear_background_jobs.execute()
+    logger.info("Cleared %d active background jobs during startup", cleared)
 
 
 async def run_worker(container: Container) -> None:
@@ -164,6 +171,8 @@ async def _progress_loop(container: Container, gateway, deliver) -> None:
 async def _present_progress(container, gateway, deliver, throttles, progress) -> None:
     job = await container.jobs.get(progress.job_id)
     if job is None:
+        return
+    if job.terminal and progress.stage is not job.stage:
         return
     target_job = job
     target_progress = progress

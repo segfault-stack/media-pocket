@@ -73,6 +73,7 @@ class ErrorCode(StrEnum):
     DELETED = "deleted"
     REGION_RESTRICTED = "region_restricted"
     EXPIRED = "expired"
+    TIMED_OUT = "timed_out"
 
 
 class CompressionDecision(StrEnum):

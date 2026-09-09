@@ -44,6 +44,10 @@ from .ports import (
 
 _RESOLVE_PROGRESS_INTERVAL_SECONDS = 2.0
 _CHAPTER_PREFLIGHT_TIMEOUT_SECONDS = 15.0
+_MIN_JOB_TIMEOUT_SECONDS = 60.0
+_MAX_JOB_TIMEOUT_SECONDS = 300.0
+_JOB_DURATION_MULTIPLIER = 2.0
+_JOB_TIMEOUT_OVERHEAD_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,8 +579,22 @@ class RepositoryCancellation:
     def __init__(self, jobs: JobRepository, job_id: str) -> None:
         self._jobs = jobs
         self._job_id = job_id
+        loop = asyncio.get_running_loop()
+        self._started_at = loop.time()
+        self._deadline = self._started_at + _MAX_JOB_TIMEOUT_SECONDS
+        self._timed_out = False
+
+    @property
+    def timed_out(self) -> bool:
+        return self._timed_out
+
+    def limit_to(self, timeout_seconds: float) -> None:
+        self._deadline = min(self._deadline, self._started_at + timeout_seconds)
 
     async def requested(self) -> bool:
+        if asyncio.get_running_loop().time() >= self._deadline:
+            self._timed_out = True
+            return True
         job = await self._jobs.get(self._job_id)
         return (
             job is None
@@ -613,6 +631,9 @@ class ProcessDownload:
         if job.cancel_requested:
             return await self._cancel(job)
         original_job = job
+        cancellation = RepositoryCancellation(self._jobs, job.id)
+        if job.compression is not None:
+            cancellation.limit_to(_duration_timeout_seconds(job.compression.duration_ms))
         try:
             job = await self._move(
                 job,
@@ -648,10 +669,14 @@ class ProcessDownload:
                         "job_ready", user_id=job.user_id, job_id=job.id
                     )
                 return job
-            cancellation = RepositoryCancellation(self._jobs, job.id)
             post = await self._resolve(adapter, job, cancellation)
+            cancellation.limit_to(_job_timeout_seconds(post))
             if await cancellation.requested():
-                return await self._cancel(job)
+                return (
+                    await self._timeout(job)
+                    if cancellation.timed_out
+                    else await self._cancel(job)
+                )
             if (
                 offers_compression
                 and job.compression_decision is CompressionDecision.ASK
@@ -714,7 +739,11 @@ class ProcessDownload:
 
             produced = await self._engine.download(post, job, report, cancellation)
             if await cancellation.requested():
-                return await self._cancel(job)
+                return (
+                    await self._timeout(job)
+                    if cancellation.timed_out
+                    else await self._cancel(job)
+                )
             job = await self._move(
                 job,
                 {JobStage.DOWNLOADING},
@@ -735,6 +764,8 @@ class ProcessDownload:
             return job
         except DownloadError as exc:
             if exc.code is ErrorCode.CANCELLED:
+                if cancellation.timed_out:
+                    return await self._timeout(job or original_job)
                 return await self._cancel(job or original_job)
             return await self._handle_error(job or original_job, exc)
         except Exception as exc:  # noqa: BLE001 - normalize unknown provider/transport failures at the use-case boundary
@@ -783,6 +814,8 @@ class ProcessDownload:
         started_at = loop.time()
         try:
             while True:
+                if await cancellation.requested():
+                    raise DownloadError(ErrorCode.CANCELLED, "Job cancelled")
                 done, _ = await asyncio.wait(
                     {task}, timeout=_RESOLVE_PROGRESS_INTERVAL_SECONDS
                 )
@@ -801,6 +834,34 @@ class ProcessDownload:
             if not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    async def _timeout(self, job: Job) -> Job | None:
+        await self._artifacts.cleanup(job.id)
+        failed = await self._jobs.transition(
+            job.id,
+            {
+                JobStage.QUEUED,
+                JobStage.RESOLVING,
+                JobStage.DOWNLOADING,
+                JobStage.PROCESSING,
+                JobStage.RETRYING,
+            },
+            JobStage.FAILED,
+            error_code=ErrorCode.TIMED_OUT,
+            error_detail="Background job exceeded its processing deadline",
+        )
+        if failed:
+            await self._analytics.record(
+                "job_timed_out", user_id=failed.user_id, job_id=failed.id
+            )
+            await self._progress.publish(
+                Progress(
+                    job_id=failed.id,
+                    stage=JobStage.FAILED,
+                    error_code=ErrorCode.TIMED_OUT,
+                )
+            )
+        return failed or await self._jobs.get(job.id)
 
     async def _cancel(self, job: Job) -> Job | None:
         cancelling = await self._jobs.transition(
@@ -1071,6 +1132,28 @@ class CleanupArtifacts:
         return len(job_ids)
 
 
+class ClearBackgroundJobs:
+    def __init__(
+        self,
+        jobs: JobRepository,
+        queue: JobQueue,
+        artifacts: ArtifactStore,
+        analytics: AnalyticsRepository,
+    ) -> None:
+        self._jobs = jobs
+        self._queue = queue
+        self._artifacts = artifacts
+        self._analytics = analytics
+
+    async def execute(self, actor_user_id: int | None = None) -> int:
+        await self._queue.clear()
+        job_ids = await self._jobs.clear_active()
+        for job_id in job_ids:
+            await self._artifacts.cleanup(job_id)
+        await self._analytics.record("jobs_cleared", user_id=actor_user_id)
+        return len(job_ids)
+
+
 class ManageSettings:
     def __init__(self, settings: SettingsRepository) -> None:
         self._settings = settings
@@ -1156,6 +1239,21 @@ def _job_percent(stage: JobStage) -> int:
         JobStage.CANCELLED: 100,
         JobStage.FAILED: 100,
     }[stage]
+
+
+def _job_timeout_seconds(post: MediaPost) -> float:
+    durations = [asset.duration_ms for asset in post.assets]
+    if not durations or any(value is None or value <= 0 for value in durations):
+        return _MAX_JOB_TIMEOUT_SECONDS
+    return _duration_timeout_seconds(sum(cast(int, value) for value in durations))
+
+
+def _duration_timeout_seconds(duration_ms: int) -> float:
+    estimated = (
+        duration_ms / 1000 * _JOB_DURATION_MULTIPLIER
+        + _JOB_TIMEOUT_OVERHEAD_SECONDS
+    )
+    return min(_MAX_JOB_TIMEOUT_SECONDS, max(_MIN_JOB_TIMEOUT_SECONDS, estimated))
 
 
 def _default_mode(platforms, preferences: UserPreferences) -> SelectionMode:

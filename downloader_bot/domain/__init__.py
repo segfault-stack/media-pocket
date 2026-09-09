@@ -1,4 +1,5 @@
 from .models import (
+    TERMINAL_STAGES,
     CompressionDecision,
     CompressionRecommendation,
     DeliveryMode,
@@ -24,6 +25,7 @@ from .models import (
 )
 
 __all__ = [
+    "TERMINAL_STAGES",
     "CompressionDecision",
     "CompressionRecommendation",
     "DeliveryMode",

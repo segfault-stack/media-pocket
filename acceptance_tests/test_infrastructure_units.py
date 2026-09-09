@@ -1520,6 +1520,7 @@ class FakeRedis:
         self.acked = []
         self.reads = []
         self.claimed = ("0-0", [])
+        self.trimmed = []
 
     async def xgroup_create(self, *args, **kwargs):
         self.groups.append((args, kwargs))
@@ -1537,6 +1538,9 @@ class FakeRedis:
     async def xautoclaim(self, *_args, **_kwargs):
         return self.claimed
 
+    async def xtrim(self, *args, **kwargs):
+        self.trimmed.append((args, kwargs))
+
 
 @pytest.mark.asyncio
 async def test_redis_stream_queue_and_progress_contracts() -> None:
@@ -1549,6 +1553,8 @@ async def test_redis_stream_queue_and_progress_contracts() -> None:
     await queue.ack("2-0")
     redis.claimed = ("0-0", [(b"3-0", {b"job_id": b"lost"})])
     assert await queue.reclaim("worker", idle_ms=10) == (("3-0", "lost"),)
+    await queue.clear()
+    assert redis.trimmed == [(("downloads",), {"maxlen": 0, "approximate": False})]
 
     bus = RedisProgressBus(redis)
     await bus.initialize()

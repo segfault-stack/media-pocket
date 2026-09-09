@@ -36,6 +36,7 @@ from .presenter import (
     ADMIN_HOME_TEXT,
     ADMIN_INVITE_CREATED_TEXT,
     ADMIN_INVITE_REVOKED_TOAST,
+    ADMIN_JOBS_CLEARED_TOAST,
     ADMIN_LIMITED_DETAILS,
     ADMIN_LIMITED_INVALID_TEXT,
     ADMIN_LIMITED_PROMPT_TEXT,
@@ -118,6 +119,7 @@ def build_router(
     revoke_invite=None,
     plan_submission=None,
     choose_compression=None,
+    clear_background_jobs=None,
 ) -> Router:
     router = Router(name="downloads-v2")
     admin_router = Router(name="invite-admin")
@@ -376,6 +378,20 @@ def build_router(
                 ),
             )
         await query.answer()
+
+    @admin_router.callback_query(F.data == "adm:jobs:clear")
+    async def admin_clear_background_jobs(query: CallbackQuery) -> None:
+        if clear_background_jobs is None:
+            await query.answer(ACTION_UNAVAILABLE_TEXT, show_alert=True)
+            return
+        count = await clear_background_jobs.execute(query.from_user.id)
+        if isinstance(query.message, Message):
+            await query.message.edit_text(
+                ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard()
+            )
+        await query.answer(
+            ADMIN_JOBS_CLEARED_TOAST.format(count=count), show_alert=True
+        )
 
     @admin_router.callback_query(F.data.startswith("adm:revoke:"))
     async def admin_revoke_invite(query: CallbackQuery) -> None:

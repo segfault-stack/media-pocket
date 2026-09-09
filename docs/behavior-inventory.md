@@ -19,6 +19,7 @@ This inventory records the supported scenarios retained by the new implementatio
 | Inline and chosen-result delivery | Durable inline job binding and inline presenter |
 | Batch links | Parent job with independently durable child jobs |
 | Audio/document callbacks | Queued-job customization without handler-specific downloaders |
-| Settings/admin/stats | Typed preferences, analytics, and shared use cases |
+| Settings/admin/stats | Typed preferences, analytics, invite controls, and active-job cleanup |
+| Background-job lifetime | Duration-scaled processing deadline capped at five minutes; startup clears active jobs and Redis work |
 
 Provider contract fixtures must remain network-free. Live Telegram and provider smoke tests are optional and are not part of automated acceptance.

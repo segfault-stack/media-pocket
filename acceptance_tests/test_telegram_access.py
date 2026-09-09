@@ -110,6 +110,16 @@ class Revoke:
         return True
 
 
+class ClearJobs:
+    def __init__(self, count: int = 3) -> None:
+        self.count = count
+        self.calls = []
+
+    async def execute(self, admin_id):
+        self.calls.append(admin_id)
+        return self.count
+
+
 class GenericStub:
     async def execute(self, *_args, **_kwargs):
         return None
@@ -134,7 +144,9 @@ def _handler_object(router, observer: str, name: str):
     )
 
 
-def _admin_router(access_control, generate=None, invites=None, revoke=None):
+def _admin_router(
+    access_control, generate=None, invites=None, revoke=None, clear_jobs=None
+):
     stub = GenericStub()
     router = build_router(
         stub,
@@ -151,6 +163,7 @@ def _admin_router(access_control, generate=None, invites=None, revoke=None):
         generate_invite=generate,
         list_invites=invites,
         revoke_invite=revoke,
+        clear_background_jobs=clear_jobs,
     )
     return router, router.sub_routers[0]
 
@@ -268,6 +281,31 @@ def test_invite_input_and_copy_button_are_short_and_explicit() -> None:
         for button in row
     ]
     assert "🔢 Limited uses" in labels
+    assert "🧹 Clear background jobs" in labels
+
+
+@pytest.mark.asyncio
+async def test_admin_can_clear_background_jobs(monkeypatch) -> None:
+    from downloader_bot.adapters.telegram import router as router_module
+
+    monkeypatch.setattr(router_module, "Message", FakeMessage)
+    clear = ClearJobs(4)
+    _root, admin = _admin_router(AccessControl(True), clear_jobs=clear)
+    message = FakeMessage("/admin")
+    message.edit_text = AsyncMock()
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        data="adm:jobs:clear",
+        message=message,
+        answer=AsyncMock(),
+    )
+
+    await _handler(admin, "callback_query", "admin_clear_background_jobs")(query)
+
+    assert clear.calls == [42]
+    assert "Administration" in message.edit_text.await_args.args[0]
+    assert query.answer.await_args.args[0] == "Cleared 4 active jobs"
+    assert query.answer.await_args.kwargs["show_alert"] is True
 
 
 @pytest.mark.asyncio

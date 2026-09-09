@@ -55,6 +55,11 @@ class RedisJobQueue:
             for message_id, fields in messages
         )
 
+    async def clear(self) -> None:
+        # Keep the consumer group intact so running workers do not fail with
+        # NOGROUP while an administrator clears queued and pending messages.
+        await self._redis.xtrim(self._stream, maxlen=0, approximate=False)
+
 
 class RedisProgressBus:
     def __init__(

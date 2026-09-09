@@ -123,8 +123,8 @@ INLINE_ACCESS_DESCRIPTION = "Open the bot and enter an invite code"
 INLINE_ACCESS_MESSAGE = "Open the bot in private chat to unlock downloads."
 INLINE_ACCESS_BUTTON = "🔓 Enter invite code"
 ADMIN_HOME_TEXT = (
-    "<b>🛠 Invite access</b>\n\n"
-    "Create a single-use, limited-use, or timed invite code."
+    "<b>🛠 Administration</b>\n\n"
+    "Invite access and background downloads."
 )
 ADMIN_INVITE_CREATED_TEXT = (
     "<b>🎫 Invite created</b>\n\n"
@@ -146,6 +146,7 @@ ADMIN_LIMITED_INVALID_TEXT = (
 ADMIN_INVITES_EMPTY_TEXT = "<b>🎫 Active invites</b>\n\nNo active invites."
 ADMIN_INVITES_TEXT = "<b>🎫 Active invites</b>\n\n{items}"
 ADMIN_INVITE_REVOKED_TOAST = "Invite revoked"
+ADMIN_JOBS_CLEARED_TOAST = "Cleared {count} active jobs"
 
 
 def access_required_keyboard(bot_username: str | None) -> InlineKeyboardMarkup | None:
@@ -180,6 +181,11 @@ def admin_invites_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🗓 30 days", callback_data="adm:new:30d"),
                 InlineKeyboardButton(text="📋 Active invites", callback_data="adm:list"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧹 Clear background jobs", callback_data="adm:jobs:clear"
+                )
             ],
         ]
     )
@@ -324,6 +330,10 @@ ERROR_CARDS = {
     ErrorCode.CANCELLED: (
         "The download was cancelled.",
         "Send the link to start again.",
+    ),
+    ErrorCode.TIMED_OUT: (
+        "The download exceeded its processing deadline.",
+        "Send the link again; every background job is limited to five minutes.",
     ),
 }
 

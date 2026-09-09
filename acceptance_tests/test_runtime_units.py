@@ -7,6 +7,7 @@ import pytest
 
 from downloader_bot.bootstrap.runtime import (
     _cleanup_loop,
+    _clear_jobs_on_start,
     _heartbeat_loop,
     _outbox_loop,
     _present_progress,
@@ -25,6 +26,20 @@ class Queue:
 
     async def publish(self, value):
         self.published.append(value)
+
+
+@pytest.mark.asyncio
+async def test_bot_startup_clears_active_background_jobs() -> None:
+    class Clear:
+        calls = 0
+
+        async def execute(self):
+            self.calls += 1
+            return 3
+
+    clear = Clear()
+    await _clear_jobs_on_start(SimpleNamespace(clear_background_jobs=clear))
+    assert clear.calls == 1
 
 
 @pytest.mark.asyncio
@@ -86,6 +101,31 @@ async def test_present_progress_updates_status_and_delivers_ready() -> None:
         Progress(job.id, JobStage.READY, 100),
     )
     assert container.jobs.transitions and deliver.values == [job.id]
+
+
+@pytest.mark.asyncio
+async def test_stale_progress_is_ignored_after_startup_cleanup() -> None:
+    cancelled = Job(
+        "job",
+        1,
+        2,
+        "https://example.com",
+        "key",
+        stage=JobStage.CANCELLED,
+    )
+
+    class Jobs:
+        async def get(self, _job_id):
+            return cancelled
+
+    gateway = SimpleNamespace(show_status=pytest.fail)
+    await _present_progress(
+        SimpleNamespace(jobs=Jobs()),
+        gateway,
+        SimpleNamespace(execute=pytest.fail),
+        {},
+        Progress(cancelled.id, JobStage.DOWNLOADING, 50),
+    )
 
 
 @pytest.mark.asyncio

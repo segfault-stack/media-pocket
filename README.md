@@ -164,7 +164,7 @@ Open the bot, run `/admin`, create an invitation code, and redeem it from each a
 | `/audio URL` | download immediately as audio |
 | `/video URL` | download immediately as video |
 | `/redeem CODE` | unlock access with an invitation |
-| `/admin` | create, list, share, and revoke invitations |
+| `/admin` | manage invitations and clear active background jobs |
 | `@your_bot URL` | submit inline from any chat after access is granted |
 
 Single results can expose contextual actions such as **Get audio**, **Get video**, **Send as file**, **Source**, and **Share**. Albums are delivered as media groups followed by one compact action card.
@@ -304,7 +304,7 @@ bootstrap → adapters / infrastructure → application → domain
 - `downloader_bot/infrastructure` — PostgreSQL, Redis Streams, providers, downloads, and artifacts;
 - `downloader_bot/bootstrap` — settings, dependency assembly, and process lifecycle.
 
-PostgreSQL is canonical state. Redis Streams carries work and progress. Selection requests survive restarts, confirmation is atomic, active jobs are deduplicated, pending Redis messages can be reclaimed, and completed artifacts are retained for a bounded period.
+PostgreSQL is canonical state. Redis Streams carries work and progress. Selection requests survive restarts, but active background jobs are cancelled and their queue is cleared when the bot starts. Confirmation is atomic, active jobs are deduplicated, and completed artifacts are retained for a bounded period. Processing deadlines scale from one minute for short media to at most five minutes; media without reliable duration metadata receives the five-minute limit.
 
 See [architecture details](docs/architecture-v2.md), the [code map](docs/code-map.md), and the [behavior inventory](docs/behavior-inventory.md).
 

@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    delete,
     exists,
     or_,
     select,
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from downloader_bot.domain import (
+    TERMINAL_STAGES,
     CompressionDecision,
     CompressionRecommendation,
     DeliveryMode,
@@ -773,6 +775,32 @@ class SqlJobRepository:
                 .limit(limit)
             )
             return tuple(rows)
+
+    async def clear_active(self) -> tuple[str, ...]:
+        now = datetime.now(UTC)
+        terminal = [item.value for item in TERMINAL_STAGES]
+        async with self._sessions.begin() as session:
+            rows = await session.scalars(
+                update(JobRow)
+                .where(JobRow.stage.not_in(terminal))
+                .values(
+                    stage=JobStage.CANCELLED.value,
+                    cancel_requested=True,
+                    error_code=ErrorCode.CANCELLED.value,
+                    error_detail="Cleared by restart or administrator",
+                    updated_at=now,
+                )
+                .returning(JobRow.id)
+            )
+            job_ids = tuple(rows)
+            if job_ids:
+                await session.execute(
+                    delete(OutboxRow).where(
+                        OutboxRow.job_id.in_(job_ids),
+                        OutboxRow.published_at.is_(None),
+                    )
+                )
+            return job_ids
 
     async def queue_position(self, job_id: str) -> int | None:
         from sqlalchemy import func

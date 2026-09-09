@@ -14,6 +14,7 @@ from downloader_bot.application.use_cases import (
     CancelDownload,
     ChooseCompression,
     CleanupArtifacts,
+    ClearBackgroundJobs,
     ConfirmSelection,
     CreateSelection,
     CustomizeJob,
@@ -32,6 +33,7 @@ from downloader_bot.application.use_cases import (
     SubmitDownload,
     SubmitDownloadCommand,
     UpdateSelection,
+    _job_timeout_seconds,
 )
 from downloader_bot.domain import (
     CompressionDecision,
@@ -176,6 +178,19 @@ class Jobs:
 
     async def queue_position(self, _job_id):
         return 1
+
+    async def clear_active(self):
+        cleared = []
+        for job_id, job in tuple(self.items.items()):
+            if not job.terminal:
+                self.items[job_id] = replace(
+                    job,
+                    stage=JobStage.CANCELLED,
+                    cancel_requested=True,
+                    error_code=ErrorCode.CANCELLED,
+                )
+                cleared.append(job_id)
+        return tuple(cleared)
 
     async def recent_for_user(self, user_id, *, limit=10):
         values = [item for item in self.items.values() if item.user_id == user_id]
@@ -430,10 +445,15 @@ async def test_direct_media_waits_for_compression_choice_before_download() -> No
 class Queue:
     def __init__(self) -> None:
         self.items = []
+        self.cleared = False
 
     async def publish(self, job_id):
         self.items.append(job_id)
         return "1-0"
+
+    async def clear(self):
+        self.cleared = True
+        self.items.clear()
 
 
 @pytest.mark.parametrize("target", [JobStage.DELIVERED, JobStage.PROCESSING])
@@ -453,6 +473,104 @@ def test_progress_throttle_contract() -> None:
     assert throttle.accept(Progress("job", JobStage.DOWNLOADING, 12))
     clock.tick = 2.9
     assert throttle.accept(Progress("job", JobStage.DOWNLOADING, 13))
+
+
+def test_job_timeout_scales_with_duration_and_caps_at_five_minutes() -> None:
+    short = MediaPost(
+        "https://example.com/short",
+        Platform.GENERIC,
+        (MediaAsset("https://cdn/short.mp4", MediaKind.VIDEO, duration_ms=10_000),),
+    )
+    medium = replace(
+        short, assets=(replace(short.assets[0], duration_ms=120_000),)
+    )
+    long = replace(short, assets=(replace(short.assets[0], duration_ms=600_000),))
+    unknown = replace(short, assets=(replace(short.assets[0], duration_ms=None),))
+
+    assert _job_timeout_seconds(short) == 60
+    assert _job_timeout_seconds(medium) == 270
+    assert _job_timeout_seconds(long) == 300
+    assert _job_timeout_seconds(unknown) == 300
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_a_deadline_exceeded_job_as_timed_out(monkeypatch) -> None:
+    class TimedAdapter(Adapter):
+        async def resolve(self, url, preferences, **_kwargs):
+            return MediaPost(
+                url,
+                self.platform,
+                (
+                    MediaAsset(
+                        "https://cdn/slow.mp4", MediaKind.VIDEO, duration_ms=1_000
+                    ),
+                ),
+            )
+
+    class TimedRegistry:
+        def detect(self, _url):
+            return TimedAdapter()
+
+    class TimedEngine(Engine):
+        async def download(self, _post, _job, _progress, cancellation):
+            while not await cancellation.requested():
+                await asyncio.sleep(0)
+            raise DownloadError(ErrorCode.CANCELLED, "deadline")
+
+    monkeypatch.setattr(
+        "downloader_bot.application.use_cases._MIN_JOB_TIMEOUT_SECONDS", 0.01
+    )
+    monkeypatch.setattr(
+        "downloader_bot.application.use_cases._MAX_JOB_TIMEOUT_SECONDS", 0.03
+    )
+    monkeypatch.setattr(
+        "downloader_bot.application.use_cases._JOB_DURATION_MULTIPLIER", 0.0
+    )
+    monkeypatch.setattr(
+        "downloader_bot.application.use_cases._JOB_TIMEOUT_OVERHEAD_SECONDS", 0.01
+    )
+    jobs, artifacts, analytics = Jobs(), Artifacts(), Analytics()
+    job = Job("timed", 1, 1, "https://example.com/slow", "timed-key")
+    jobs.items[job.id] = job
+
+    result = await ProcessDownload(
+        jobs,
+        TimedRegistry(),
+        TimedEngine(),
+        artifacts,
+        Bus(),
+        analytics,
+        Clock(),
+        Cache(),
+    ).execute(job.id)
+
+    assert result and result.stage is JobStage.FAILED
+    assert result.error_code is ErrorCode.TIMED_OUT
+    assert artifacts.cleaned == [job.id]
+    assert "job_timed_out" in analytics.events
+
+
+@pytest.mark.asyncio
+async def test_clear_background_jobs_cancels_active_jobs_and_empties_queue() -> None:
+    jobs, queue, artifacts, analytics = Jobs(), Queue(), Artifacts(), Analytics()
+    active = Job("active", 1, 1, "https://example.com/a", "a")
+    delivered = replace(
+        Job("done", 1, 1, "https://example.com/b", "b"),
+        stage=JobStage.DELIVERED,
+    )
+    jobs.items = {active.id: active, delivered.id: delivered}
+    queue.items.append(active.id)
+
+    count = await ClearBackgroundJobs(jobs, queue, artifacts, analytics).execute(
+        actor_user_id=42
+    )
+
+    assert count == 1
+    assert jobs.items[active.id].stage is JobStage.CANCELLED
+    assert jobs.items[delivered.id].stage is JobStage.DELIVERED
+    assert queue.cleared and queue.items == []
+    assert artifacts.cleaned == [active.id]
+    assert analytics.events == ["jobs_cleared"]
 
 
 @pytest.mark.asyncio
