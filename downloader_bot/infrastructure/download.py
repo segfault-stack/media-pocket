@@ -455,7 +455,9 @@ class HttpDownloadEngine:
         progress,
         cancellation,
     ) -> Path:
-        if asset.requires_extractor_download:
+        if asset.requires_extractor_download and (
+            job.audio_only or not asset.stream_copy_compatible
+        ):
             return await self._download_merged_with_pipe(
                 asset,
                 job,

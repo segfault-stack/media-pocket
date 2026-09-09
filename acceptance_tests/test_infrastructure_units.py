@@ -682,6 +682,73 @@ async def test_merged_provider_download_pipes_to_telegram_mp4(
 
 
 @pytest.mark.asyncio
+async def test_compatible_merged_provider_uses_fast_ytdlp_remux(
+    monkeypatch, tmp_path
+) -> None:
+    command: tuple[object, ...] = ()
+
+    class Stdout:
+        async def readline(self):
+            return b""
+
+    class Stderr:
+        async def read(self):
+            return b""
+
+    class Process:
+        returncode = None
+        stdout = Stdout()
+        stderr = Stderr()
+
+        def __init__(self, template: Path) -> None:
+            self.template = template
+
+        async def wait(self):
+            Path(str(self.template).replace("%(ext)s", "mp4")).write_bytes(b"remuxed")
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = -15
+
+    async def create(*args, **_kwargs):
+        nonlocal command
+        command = args
+        assert args[0] != "ffmpeg"
+        return Process(Path(args[args.index("--output") + 1]))
+
+    async def unexpected_pipe(*_args, **_kwargs):
+        raise AssertionError("compatible streams must use yt-dlp's fast file remux")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr(
+        HttpDownloadEngine, "_download_merged_with_pipe", unexpected_pipe
+    )
+    async with httpx.AsyncClient() as client:
+        output = await HttpDownloadEngine(client, tmp_path)._download_with_ytdlp(
+            MediaAsset(
+                "https://provider.example/post/x",
+                MediaKind.VIDEO,
+                extractor_url="https://provider.example/post/x",
+                format_selector="bestvideo+bestaudio/best",
+                requires_extractor_download=True,
+                stream_copy_compatible=True,
+            ),
+            Job("job", 1, 1, "https://provider.example/post/x", "key"),
+            1,
+            1,
+            tmp_path,
+            lambda _event: asyncio.sleep(0),
+            Cancellation(),
+        )
+
+    assert output.read_bytes() == b"remuxed"
+    assert command[command.index("--output") + 1] != "-"
+    assert "--merge-output-format" in command
+    assert "--postprocessor-args" in command
+
+
+@pytest.mark.asyncio
 async def test_chapter_split_downloads_once_and_removes_full_album(
     monkeypatch, tmp_path
 ) -> None:
