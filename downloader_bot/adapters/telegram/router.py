@@ -117,6 +117,7 @@ def build_router(
     list_invites=None,
     revoke_invite=None,
     plan_submission=None,
+    choose_compression=None,
 ) -> Router:
     router = Router(name="downloads-v2")
     admin_router = Router(name="invite-admin")
@@ -582,6 +583,30 @@ def build_router(
         if query.data:
             await deliver.execute(query.data.rsplit(":", 1)[-1], manual_retry=True)
         await query.answer()
+
+    @router.callback_query(F.data.startswith("job:compression:"))
+    async def choose_media_compression(query: CallbackQuery) -> None:
+        if not query.data or choose_compression is None:
+            return
+        _, _, action, job_id = query.data.split(":", 3)
+        if action not in {"compact", "original"}:
+            await query.answer(ACTION_UNAVAILABLE_TEXT, show_alert=True)
+            return
+        job = await choose_compression.execute(
+            job_id, query.from_user.id, compact=action == "compact"
+        )
+        if job is None:
+            await query.answer(ALREADY_HANDLED_TEXT, show_alert=True)
+            return
+        await gateway.show_status(
+            job,
+            Progress(
+                job_id=job.id,
+                stage=JobStage.QUEUED,
+                queue_position=await jobs.queue_position(job.id),
+            ),
+        )
+        await query.answer(DOWNLOAD_STARTED_TEXT)
 
     @router.callback_query(F.data.startswith("job:audio:"))
     async def request_audio(query: CallbackQuery) -> None:

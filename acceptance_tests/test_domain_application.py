@@ -12,6 +12,7 @@ from downloader_bot.application.progress import ProgressThrottle
 from downloader_bot.application.use_cases import (
     BindInlineResult,
     CancelDownload,
+    ChooseCompression,
     CleanupArtifacts,
     ConfirmSelection,
     CreateSelection,
@@ -33,6 +34,8 @@ from downloader_bot.application.use_cases import (
     UpdateSelection,
 )
 from downloader_bot.domain import (
+    CompressionDecision,
+    CompressionRecommendation,
     DeliveryMode,
     DownloadArtifact,
     ErrorCode,
@@ -132,6 +135,31 @@ class Jobs:
             preferences=preferences,
         )
         self.items[job_id] = job
+        return job
+
+    async def offer_compression(self, job_id, recommendation):
+        job = self.items.get(job_id)
+        if not job or job.stage is not JobStage.RESOLVING:
+            return None
+        job = replace(
+            job,
+            stage=JobStage.AWAITING_COMPRESSION,
+            compression=recommendation,
+        )
+        self.items[job_id] = job
+        return job
+
+    async def choose_compression(self, job_id, user_id, decision):
+        job = self.items.get(job_id)
+        if (
+            not job
+            or job.user_id != user_id
+            or job.stage is not JobStage.AWAITING_COMPRESSION
+        ):
+            return None
+        job = replace(job, stage=JobStage.QUEUED, compression_decision=decision)
+        self.items[job_id] = job
+        self.outbox.append((len(self.outbox) + 1, job_id))
         return job
 
     async def claim_outbox(self, limit=100):
@@ -313,9 +341,90 @@ class SimpleAdapter:
 
 
 class Engine:
+    async def compression_recommendation(self, _post, _job, _cancellation):
+        return None
+
     async def download(self, _post, job, progress, _cancellation):
         await progress(Progress(job.id, JobStage.DOWNLOADING, 50))
         return (ARTIFACT,)
+
+
+@pytest.mark.asyncio
+async def test_direct_media_waits_for_compression_choice_before_download() -> None:
+    recommendation = CompressionRecommendation(
+        kind=MediaKind.VIDEO,
+        original_size=300 * 1024 * 1024,
+        estimated_size=30 * 1024 * 1024,
+        duration_ms=80_000,
+        bitrate=30_000_000,
+        target_bitrate=3_000_000,
+        width=3840,
+        height=2160,
+        fps=30,
+    )
+
+    class DirectAdapter(Adapter):
+        offers_compression = True
+
+        async def resolve(self, url, preferences, **_kwargs):
+            return MediaPost(
+                url,
+                self.platform,
+                (
+                    MediaAsset(
+                        "https://cdn/x.mp4",
+                        MediaKind.VIDEO,
+                        compact_candidate=True,
+                    ),
+                ),
+            )
+
+    class DirectRegistry:
+        def detect(self, _url):
+            return DirectAdapter()
+
+    class CompactEngine(Engine):
+        downloads = 0
+
+        async def compression_recommendation(self, _post, _job, _cancellation):
+            return recommendation
+
+        async def download(self, _post, job, progress, cancellation):
+            assert job.compression_decision is CompressionDecision.COMPACT
+            self.downloads += 1
+            return await super().download(_post, job, progress, cancellation)
+
+    jobs = Jobs()
+    job = Job("compact", 1, 1, "https://example.com/x.mp4", "key")
+    jobs.items[job.id] = job
+    engine = CompactEngine()
+    analytics = Analytics()
+    process = ProcessDownload(
+        jobs,
+        DirectRegistry(),
+        engine,
+        Artifacts(),
+        Bus(),
+        analytics,
+        Clock(),
+        Cache(),
+    )
+
+    waiting = await process.execute(job.id)
+    assert waiting and waiting.stage is JobStage.AWAITING_COMPRESSION
+    assert engine.downloads == 0
+    queued = await ChooseCompression(jobs, analytics).execute(
+        job.id, job.user_id, compact=True
+    )
+    assert queued and queued.stage is JobStage.QUEUED
+    ready = await process.execute(job.id)
+    assert ready and ready.stage is JobStage.READY
+    assert engine.downloads == 1
+    assert analytics.events == [
+        "compression_offered",
+        "compression_compact",
+        "job_ready",
+    ]
 
 
 class Queue:

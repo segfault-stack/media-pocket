@@ -10,6 +10,8 @@ import pytest
 
 from downloader_bot.__main__ import download_hitmoz
 from downloader_bot.domain import (
+    CompressionDecision,
+    CompressionRecommendation,
     DeliveryMode,
     DownloadArtifact,
     ErrorCode,
@@ -48,6 +50,8 @@ from downloader_bot.infrastructure.download import (
     _YTDLP_PROGRESS_PREFIX,
     HttpDownloadEngine,
     _audio_strategy,
+    _compact_ffmpeg_process,
+    _compression_recommendation,
     _download_headers,
     _is_telegram_compatible_video,
     _next_chunk,
@@ -70,6 +74,189 @@ class Cancellation:
 
     async def requested(self):
         return self.value
+
+
+def test_compression_recommendation_uses_streaming_bitrate_and_savings() -> None:
+    video = _compression_recommendation(
+        {
+            "format": {
+                "duration": "80",
+                "size": str(300 * 1024 * 1024),
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "width": 3840,
+                    "height": 2160,
+                    "avg_frame_rate": "30/1",
+                }
+            ],
+        },
+        MediaKind.VIDEO,
+    )
+    assert video is not None
+    assert video.target_bitrate == 3_000_000
+    assert video.estimated_size < video.original_size * 0.2
+
+    already_compact = _compression_recommendation(
+        {
+            "format": {
+                "duration": "80",
+                "size": str(28 * 1024 * 1024),
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "width": 1280,
+                    "height": 720,
+                    "avg_frame_rate": "30/1",
+                }
+            ],
+        },
+        MediaKind.VIDEO,
+    )
+    assert already_compact is None
+
+    audio = _compression_recommendation(
+        {
+            "format": {
+                "duration": "600",
+                "bit_rate": "1000000",
+            },
+            "streams": [{"codec_type": "audio", "duration": "600"}],
+        },
+        MediaKind.AUDIO,
+    )
+    assert audio is not None
+    assert audio.target_bitrate == 160_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "target_bitrate", "container"),
+    [
+        (MediaKind.VIDEO, 3_000_000, "mp4"),
+        (MediaKind.AUDIO, 160_000, "ipod"),
+    ],
+)
+async def test_compact_ffmpeg_process_reads_the_remote_stream_directly(
+    monkeypatch, tmp_path, kind, target_bitrate, container
+) -> None:
+    command = ()
+    sentinel = object()
+
+    async def create(*args, **kwargs):
+        nonlocal command
+        command = args
+        assert kwargs["stdin"] is asyncio.subprocess.DEVNULL
+        return sentinel
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create)
+    result = await _compact_ffmpeg_process(
+        tmp_path / "output.part",
+        kind,
+        target_bitrate,
+        "https://cdn.example/media.mp4",
+        {"Referer": "https://cdn.example/"},
+    )
+
+    assert result is sentinel
+    assert command[command.index("-i") + 1] == "https://cdn.example/media.mp4"
+    assert command[command.index("-f") + 1] == container
+    assert "Referer: https://cdn.example/\r\n" in command
+    if kind is MediaKind.VIDEO:
+        assert "libx264" in command
+        assert "force_original_aspect_ratio=decrease" in command[command.index("-vf") + 1]
+    else:
+        assert "-vn" in command
+
+
+@pytest.mark.asyncio
+async def test_compact_direct_download_streams_with_ffmpeg_without_original(
+    monkeypatch, tmp_path
+) -> None:
+    source_bytes = b"source-media" * 100
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the HTTP client must not download a second copy")
+
+    class Process:
+        def __init__(self, output: Path) -> None:
+            self.output = output
+            self.returncode = None
+            self.stderr = None
+
+        async def wait(self):
+            self.output.write_bytes(b"compact-media")
+            self.returncode = 0
+            return 0
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+    async def ffmpeg(output, _kind, _bitrate, input_url, headers):
+        assert input_url == "https://cdn.example/video.mp4"
+        assert headers["Referer"] == "https://cdn.example/"
+        return Process(output)
+
+    async def finalize(self, target, asset, job, *_args):
+        del self, asset, job
+        return DownloadArtifact(
+            target,
+            MediaKind.VIDEO,
+            target.stat().st_size,
+            "checksum",
+        )
+
+    monkeypatch.setattr(
+        "downloader_bot.infrastructure.download._compact_ffmpeg_process", ffmpeg
+    )
+    monkeypatch.setattr(HttpDownloadEngine, "_finalize", finalize)
+    recommendation = CompressionRecommendation(
+        MediaKind.VIDEO,
+        len(source_bytes),
+        13,
+        1_000,
+        10_000_000,
+        3_000_000,
+        3840,
+        2160,
+        30,
+    )
+    job = Job(
+        "pipe",
+        1,
+        1,
+        "https://cdn.example/video.mp4",
+        "key",
+        compression_decision=CompressionDecision.COMPACT,
+        compression=recommendation,
+    )
+    post = MediaPost(
+        job.source_url,
+        Platform.GENERIC,
+        (
+            MediaAsset(
+                job.source_url,
+                MediaKind.VIDEO,
+                compact_candidate=True,
+                request_headers=(("Referer", "https://cdn.example/"),),
+            ),
+        ),
+    )
+    events = []
+
+    async def progress(value):
+        events.append(value)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        artifacts = await HttpDownloadEngine(client, tmp_path).download(
+            post, job, progress, Cancellation()
+        )
+
+    assert artifacts[0].path.suffix == ".mp4"
+    assert Path(artifacts[0].path).read_bytes() == b"compact-media"
+    assert events[-1].detail == "compressing_while_downloading"
 
 
 @pytest.mark.asyncio
@@ -1216,6 +1403,15 @@ def test_database_mapping_round_trip_and_schema() -> None:
         business_connection_id="business",
         inline_message_id="inline",
         audio_only=True,
+        compression_decision=CompressionDecision.COMPACT,
+        compression=CompressionRecommendation(
+            MediaKind.AUDIO,
+            50_000_000,
+            20_000_000,
+            1_000_000,
+            400_000,
+            160_000,
+        ),
     )
     values = _job_values(job)
     mapped = _job(JobRow(**values))

@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Protocol
 
 from downloader_bot.domain import (
+    CompressionDecision,
+    CompressionRecommendation,
     DownloadArtifact,
     InviteCode,
     InviteRedemption,
@@ -42,6 +44,13 @@ class PlatformRegistry(Protocol):
 
 
 class DownloadEngine(Protocol):
+    async def compression_recommendation(
+        self,
+        post: MediaPost,
+        job: Job,
+        cancellation: Cancellation,
+    ) -> CompressionRecommendation | None: ...
+
     async def download(
         self,
         post: MediaPost,
@@ -84,6 +93,12 @@ class JobRepository(Protocol):
         *,
         audio_only: bool | None = None,
         document_mode: bool | None = None,
+    ) -> Job | None: ...
+    async def choose_compression(
+        self, job_id: str, user_id: int, decision: CompressionDecision
+    ) -> Job | None: ...
+    async def offer_compression(
+        self, job_id: str, recommendation: CompressionRecommendation
     ) -> Job | None: ...
     async def claim_outbox(self, limit: int = 100) -> tuple[tuple[int, str], ...]: ...
     async def mark_outbox_published(self, event_id: int) -> None: ...

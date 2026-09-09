@@ -16,6 +16,7 @@ from downloader_bot.application.access import (
 from downloader_bot.application.use_cases import (
     BindInlineResult,
     CancelDownload,
+    ChooseCompression,
     CleanupArtifacts,
     ConfirmSelection,
     CreateSelection,
@@ -79,6 +80,7 @@ class Container:
     cancel: CancelDownload
     bind_inline: BindInlineResult
     customize_job: CustomizeJob
+    choose_compression: ChooseCompression
     refresh_parent: RefreshParent
     cleanup_artifacts: CleanupArtifacts
     process: ProcessDownload
@@ -171,6 +173,7 @@ async def build_container(settings: Settings) -> Container:
         cancel=CancelDownload(jobs, analytics),
         bind_inline=BindInlineResult(jobs),
         customize_job=CustomizeJob(jobs),
+        choose_compression=ChooseCompression(jobs, analytics),
         refresh_parent=RefreshParent(jobs, progress),
         cleanup_artifacts=CleanupArtifacts(jobs, artifacts, clock),
         process=ProcessDownload(

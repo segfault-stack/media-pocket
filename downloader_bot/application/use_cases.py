@@ -8,6 +8,7 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 from downloader_bot.domain import (
+    CompressionDecision,
     DeliveryMode,
     ErrorCode,
     Job,
@@ -186,10 +187,10 @@ class CancelDownload:
             await self._analytics.record(
                 "job_cancel_requested", user_id=user_id, job_id=job.id
             )
-            if job.stage is JobStage.QUEUED:
+            if job.stage in {JobStage.QUEUED, JobStage.AWAITING_COMPRESSION}:
                 cancelling = await self._jobs.transition(
                     job.id,
-                    {JobStage.QUEUED},
+                    {JobStage.QUEUED, JobStage.AWAITING_COMPRESSION},
                     JobStage.CANCELLING,
                     cancel_requested=True,
                 )
@@ -623,7 +624,13 @@ class ProcessDownload:
             if job is None:
                 return await self._jobs.get(job_id)
             adapter = self._registry.detect(job.source_url)
-            cached = await self._cache.get(job.cache_key)
+            offers_compression = bool(getattr(adapter, "offers_compression", False))
+            cached = (
+                None
+                if offers_compression
+                and job.compression_decision is CompressionDecision.ASK
+                else await self._cache.get(job.cache_key)
+            )
             if cached:
                 await self._artifacts.persist(job.id, cached)
                 job = await self._move(
@@ -645,6 +652,53 @@ class ProcessDownload:
             post = await self._resolve(adapter, job, cancellation)
             if await cancellation.requested():
                 return await self._cancel(job)
+            if (
+                offers_compression
+                and job.compression_decision is CompressionDecision.ASK
+                and not job.preferences.document_mode
+            ):
+                recommendation = await self._engine.compression_recommendation(
+                    post, job, cancellation
+                )
+                if recommendation is not None:
+                    awaiting = await self._jobs.offer_compression(
+                        job.id, recommendation
+                    )
+                    if awaiting is None:
+                        return await self._jobs.get(job.id)
+                    await self._analytics.record(
+                        "compression_offered",
+                        user_id=awaiting.user_id,
+                        job_id=awaiting.id,
+                    )
+                    await self._progress.publish(
+                        Progress(
+                            job_id=awaiting.id,
+                            stage=JobStage.AWAITING_COMPRESSION,
+                            attempt=awaiting.attempt,
+                        )
+                    )
+                    return awaiting
+                cached = await self._cache.get(job.cache_key)
+                if cached:
+                    await self._artifacts.persist(job.id, cached)
+                    job = await self._move(
+                        job,
+                        {JobStage.RESOLVING},
+                        JobStage.PROCESSING,
+                        0,
+                        indeterminate=True,
+                    )
+                    if job is None:
+                        return await self._jobs.get(job_id)
+                    job = await self._move(
+                        job, {JobStage.PROCESSING}, JobStage.READY, 100
+                    )
+                    if job:
+                        await self._analytics.record(
+                            "job_ready", user_id=job.user_id, job_id=job.id
+                        )
+                    return job
             job = await self._move(
                 job,
                 {JobStage.RESOLVING},
@@ -756,6 +810,7 @@ class ProcessDownload:
                 JobStage.RESOLVING,
                 JobStage.DOWNLOADING,
                 JobStage.PROCESSING,
+                JobStage.AWAITING_COMPRESSION,
                 JobStage.READY,
                 JobStage.RETRYING,
             },
@@ -923,6 +978,25 @@ class CustomizeJob:
         return await self._jobs.customize(job_id, user_id, document_mode=True)
 
 
+class ChooseCompression:
+    def __init__(self, jobs: JobRepository, analytics: AnalyticsRepository) -> None:
+        self._jobs = jobs
+        self._analytics = analytics
+
+    async def execute(
+        self, job_id: str, user_id: int, *, compact: bool
+    ) -> Job | None:
+        decision = (
+            CompressionDecision.COMPACT if compact else CompressionDecision.ORIGINAL
+        )
+        job = await self._jobs.choose_compression(job_id, user_id, decision)
+        if job is not None:
+            await self._analytics.record(
+                f"compression_{decision.value}", user_id=user_id, job_id=job.id
+            )
+        return job
+
+
 class RefreshParent:
     def __init__(self, jobs: JobRepository, progress: ProgressBus) -> None:
         self._jobs = jobs
@@ -946,7 +1020,13 @@ class RefreshParent:
             else:
                 stage = JobStage.FAILED
         elif any(
-            child.stage in {JobStage.READY, JobStage.DELIVERING} for child in children
+            child.stage
+            in {
+                JobStage.AWAITING_COMPRESSION,
+                JobStage.READY,
+                JobStage.DELIVERING,
+            }
+            for child in children
         ):
             stage = JobStage.PROCESSING
         elif any(
@@ -1065,6 +1145,7 @@ def _job_percent(stage: JobStage) -> int:
     return {
         JobStage.QUEUED: 0,
         JobStage.RESOLVING: 10,
+        JobStage.AWAITING_COMPRESSION: 15,
         JobStage.DOWNLOADING: 50,
         JobStage.RETRYING: 50,
         JobStage.PROCESSING: 90,

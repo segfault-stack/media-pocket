@@ -6,6 +6,7 @@ from urllib.parse import quote, urlsplit
 from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from downloader_bot.domain import (
+    CompressionRecommendation,
     DeliveryMode,
     ErrorCode,
     InviteKind,
@@ -256,6 +257,7 @@ STAGE_LABELS = {
     JobStage.RESOLVING: "🔎 Checking the link",
     JobStage.DOWNLOADING: "⬇️ Downloading",
     JobStage.PROCESSING: "✨ Preparing media",
+    JobStage.AWAITING_COMPRESSION: "📱 Waiting for your choice",
     JobStage.READY: "✨ Preparing media",
     JobStage.DELIVERING: "☁️ Sending to Telegram",
     JobStage.DELIVERED: "✅ Delivered",
@@ -264,6 +266,24 @@ STAGE_LABELS = {
     JobStage.CANCELLED: "✖️ Cancelled",
     JobStage.FAILED: "⚠️ Download failed",
 }
+
+
+def render_compression_offer(value: CompressionRecommendation) -> str:
+    media = "Video" if value.kind.value == "video" else "Audio"
+    details = []
+    if value.width and value.height:
+        details.append(f"{value.width}×{value.height}")
+    details.append(f"{value.bitrate / 1_000_000:.1f} Mbit/s")
+    details.append(_bytes(value.original_size))
+    target = ("up to 720p · " if value.kind.value == "video" else "") + (
+        f"about {_bytes(value.estimated_size)}"
+    )
+    return (
+        f"<b>📱 {media} is heavy for streaming</b>\n"
+        f"{' · '.join(details)}\n\n"
+        f"Compact version: {target}\n"
+        "Compression will happen while downloading; the source will not be downloaded twice."
+    )
 ERROR_CARDS = {
     ErrorCode.PRIVATE: (
         "This media is private.",

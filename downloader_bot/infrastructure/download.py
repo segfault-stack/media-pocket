@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 import httpx
 
 from downloader_bot.domain import (
+    CompressionDecision,
+    CompressionRecommendation,
     DownloadArtifact,
     ErrorCode,
     Job,
@@ -68,6 +70,32 @@ class HttpDownloadEngine:
                 )
             )
         return args
+
+    async def compression_recommendation(
+        self, post: MediaPost, job: Job, cancellation
+    ) -> CompressionRecommendation | None:
+        if len(post.assets) != 1:
+            return None
+        asset = post.assets[0]
+        if not asset.compact_candidate:
+            return None
+        kind = MediaKind.AUDIO if job.audio_only else asset.kind
+        if kind not in {MediaKind.AUDIO, MediaKind.VIDEO}:
+            return None
+        headers = _download_headers(post, asset.source_url)
+        headers.update(asset.request_headers)
+        for source_url in (asset.source_url, *asset.fallback_urls):
+            if await cancellation.requested():
+                raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+            probe = await _probe_remote_media(source_url, headers)
+            recommendation = _compression_recommendation(
+                probe, kind, size_hint=asset.size_hint
+            )
+            if recommendation is not None:
+                return recommendation
+            if probe is not None:
+                return None
+        return None
 
     async def download(
         self, post: MediaPost, job: Job, progress, cancellation
@@ -146,6 +174,14 @@ class HttpDownloadEngine:
             except httpx.HTTPError as exc:
                 if index == len(candidates) - 1 or not _can_retry_mirror(exc):
                     raise
+            except DownloadError as exc:
+                if (
+                    index == len(candidates) - 1
+                    or not asset.compact_candidate
+                    or job.compression_decision is not CompressionDecision.COMPACT
+                    or not exc.retryable
+                ):
+                    raise
         raise AssertionError("direct media candidates cannot be empty")
 
     async def _download_asset(
@@ -185,6 +221,19 @@ class HttpDownloadEngine:
             target = _asset_path(
                 directory, asset, suffix, audio_only=job.audio_only
             )
+            if (
+                asset.compact_candidate
+                and job.compression_decision is CompressionDecision.COMPACT
+            ):
+                return await self._download_compact_asset(
+                    post,
+                    job,
+                    asset,
+                    target,
+                    item,
+                    progress,
+                    cancellation,
+                )
             partial = target.with_suffix(f"{target.suffix}.part")
             digest = hashlib.sha256()
             written = 0
@@ -299,6 +348,102 @@ class HttpDownloadEngine:
             return await self._finalize(
                 target, asset, job, progress, item, len(post.assets), cancellation
             )
+
+    async def _download_compact_asset(
+        self,
+        post: MediaPost,
+        job: Job,
+        asset,
+        target: Path,
+        item: int,
+        progress,
+        cancellation,
+    ) -> DownloadArtifact:
+        recommendation = job.compression
+        if recommendation is None:
+            raise DownloadError(
+                ErrorCode.PROVIDER_FAILURE,
+                "Compact download is missing its media profile",
+            )
+        kind = MediaKind.AUDIO if job.audio_only else asset.kind
+        suffix = ".m4a" if kind is MediaKind.AUDIO else ".mp4"
+        target = target.with_suffix(suffix)
+        partial = target.with_name(f"{target.name}.part")
+        partial.unlink(missing_ok=True)
+        headers = _download_headers(post, asset.source_url)
+        headers.update(asset.request_headers)
+        process = await _compact_ffmpeg_process(
+            partial,
+            kind,
+            recommendation.target_bitrate,
+            asset.source_url,
+            headers,
+        )
+        stderr_task = (
+            asyncio.create_task(process.stderr.read())
+            if process.stderr is not None
+            else None
+        )
+        started_at = time.monotonic()
+        try:
+            while process.returncode is None:
+                if await cancellation.requested():
+                    raise DownloadError(ErrorCode.CANCELLED, "Download cancelled")
+                output_size = partial.stat().st_size if partial.exists() else 0
+                if output_size > self._max_file_size:
+                    raise DownloadError(
+                        ErrorCode.TOO_LARGE,
+                        "Compact media exceeds the configured size limit",
+                    )
+                elapsed = max(0, int(time.monotonic() - started_at))
+                await progress(
+                    Progress(
+                        job_id=job.id,
+                        stage=JobStage.DOWNLOADING,
+                        percent=min(
+                            99,
+                            int(
+                                output_size
+                                * 100
+                                / max(1, recommendation.estimated_size)
+                            ),
+                        ),
+                        attempt=job.attempt,
+                        item=item,
+                        item_count=len(post.assets),
+                        downloaded_bytes=output_size,
+                        total_bytes=recommendation.estimated_size,
+                        total_bytes_is_estimate=True,
+                        elapsed_seconds=elapsed,
+                        indeterminate=False,
+                        detail="compressing_while_downloading",
+                    )
+                )
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=0.5)
+                except TimeoutError:
+                    continue
+        except BaseException:
+            if process.returncode is None:
+                process.terminate()
+                await process.wait()
+            if stderr_task is not None:
+                await stderr_task
+            partial.unlink(missing_ok=True)
+            raise
+        stderr_output = await stderr_task if stderr_task is not None else b""
+        if process.returncode:
+            detail = stderr_output.decode(errors="replace")[-1000:]
+            partial.unlink(missing_ok=True)
+            raise DownloadError(
+                ErrorCode.PROVIDER_FAILURE,
+                detail or "Streaming media compression failed",
+                retryable=True,
+            )
+        partial.replace(target)
+        return await self._finalize(
+            target, asset, job, progress, item, len(post.assets), cancellation
+        )
 
     async def _download_with_ytdlp(
         self,
@@ -871,6 +1016,239 @@ def _suffix(url: str, kind: str) -> str:
     if suffix and len(suffix) <= 8:
         return suffix
     return ".mp3" if kind == "audio" else ".mp4"
+
+
+async def _probe_remote_media(
+    url: str, headers: dict[str, str]
+) -> dict[str, object] | None:
+    header_args: tuple[str, ...] = ()
+    if headers:
+        header_args = (
+            "-headers",
+            "".join(f"{key}: {value}\r\n" for key, value in headers.items()),
+        )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-probesize",
+            "5000000",
+            "-analyzeduration",
+            "5000000",
+            *header_args,
+            "-show_entries",
+            (
+                "format=duration,size,bit_rate,format_name:"
+                "stream=codec_type,codec_name,width,height,avg_frame_rate,"
+                "r_frame_rate,bit_rate,duration"
+            ),
+            "-of",
+            "json",
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            return None
+        if process.returncode:
+            return None
+        value = json.loads(stdout)
+        return value if isinstance(value, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _compression_recommendation(
+    probe: dict[str, object] | None,
+    kind: MediaKind,
+    *,
+    size_hint: int | None = None,
+) -> CompressionRecommendation | None:
+    if probe is None:
+        return None
+    raw_format = probe.get("format")
+    media_format = raw_format if isinstance(raw_format, dict) else {}
+    raw_streams = probe.get("streams")
+    streams = raw_streams if isinstance(raw_streams, list) else []
+    duration = _probe_number(media_format.get("duration"))
+    if not duration:
+        duration = next(
+            (
+                value
+                for stream in streams
+                if isinstance(stream, dict)
+                and (value := _probe_number(stream.get("duration")))
+            ),
+            None,
+        )
+    if not duration or duration <= 0:
+        return None
+    original_size = _probe_positive_int(media_format.get("size")) or size_hint
+    if not original_size:
+        format_bitrate = _probe_positive_int(media_format.get("bit_rate"))
+        original_size = (
+            int(format_bitrate * duration / 8) if format_bitrate else None
+        )
+    if not original_size:
+        return None
+    actual_bitrate = max(1, int(original_size * 8 / duration))
+    video_stream = next(
+        (
+            stream
+            for stream in streams
+            if isinstance(stream, dict) and stream.get("codec_type") == "video"
+        ),
+        None,
+    )
+    width = _probe_positive_int(video_stream.get("width")) if video_stream else None
+    height = _probe_positive_int(video_stream.get("height")) if video_stream else None
+    fps = (
+        _frame_rate(
+            video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate")
+        )
+        if video_stream
+        else None
+    )
+    if kind is MediaKind.AUDIO:
+        target_bitrate = 160_000
+        minimum_saving = 5 * 1024 * 1024
+        target_total_bitrate = target_bitrate
+    else:
+        target_bitrate = 4_500_000 if fps and fps > 30 else 3_000_000
+        minimum_saving = 8 * 1024 * 1024
+        target_total_bitrate = target_bitrate + 160_000
+    estimated_size = max(1, int(duration * target_total_bitrate / 8 * 1.02))
+    saving = original_size - estimated_size
+    if (
+        actual_bitrate < int(target_total_bitrate * 1.25)
+        or saving < minimum_saving
+        or saving / original_size < 0.25
+    ):
+        return None
+    return CompressionRecommendation(
+        kind=kind,
+        original_size=original_size,
+        estimated_size=estimated_size,
+        duration_ms=max(1, int(duration * 1000)),
+        bitrate=actual_bitrate,
+        target_bitrate=target_bitrate,
+        width=width,
+        height=height,
+        fps=fps,
+    )
+
+
+def _frame_rate(value: object) -> float | None:
+    if not value:
+        return None
+    try:
+        numerator, separator, denominator = str(value).partition("/")
+        result = (
+            float(numerator) / float(denominator) if separator else float(numerator)
+        )
+        return result if result > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _probe_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _probe_positive_int(value: object) -> int | None:
+    number = _probe_number(value)
+    return int(number) if number is not None and number > 0 else None
+
+
+async def _compact_ffmpeg_process(
+    output: Path,
+    kind: MediaKind,
+    target_bitrate: int,
+    input_url: str,
+    headers: dict[str, str],
+) -> asyncio.subprocess.Process:
+    header_args: tuple[str, ...] = ()
+    if headers:
+        header_args = (
+            "-headers",
+            "".join(f"{key}: {value}\r\n" for key, value in headers.items()),
+        )
+    if kind is MediaKind.AUDIO:
+        media_args = (
+            "-vn",
+            "-map",
+            "0:a:0",
+            "-codec:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-b:a",
+            str(target_bitrate),
+        )
+        container = "ipod"
+    else:
+        maximum = int(target_bitrate * 1.5)
+        media_args = (
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-codec:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-vf",
+            (
+                "scale=if(gt(a\\,1)\\,1280\\,720):"
+                "if(gt(a\\,1)\\,720\\,1280):"
+                "force_original_aspect_ratio=decrease:force_divisible_by=2"
+            ),
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "2",
+            "-b:v",
+            str(target_bitrate),
+            "-maxrate",
+            str(maximum),
+            "-bufsize",
+            str(target_bitrate * 2),
+            "-codec:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-b:a",
+            "160000",
+            "-movflags",
+            "+faststart",
+        )
+        container = "mp4"
+    return await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        *header_args,
+        "-i",
+        input_url,
+        *media_args,
+        "-f",
+        container,
+        str(output),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
 
 
 def _asset_path(

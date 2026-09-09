@@ -31,6 +31,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from downloader_bot.domain import (
+    CompressionDecision,
+    CompressionRecommendation,
     DeliveryMode,
     DownloadArtifact,
     ErrorCode,
@@ -163,6 +165,7 @@ class JobRow(Base):
     inline_message_id: Mapped[str | None] = mapped_column(String(256))
     audio_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     preferences_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    compression_json: Mapped[str | None] = mapped_column(Text)
     cancel_requested: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
@@ -589,7 +592,12 @@ class SqlJobRepository:
                 .where(
                     JobRow.parent_id == parent_id,
                     JobRow.user_id == user_id,
-                    JobRow.stage == JobStage.QUEUED.value,
+                    JobRow.stage.in_(
+                        [
+                            JobStage.QUEUED.value,
+                            JobStage.AWAITING_COMPRESSION.value,
+                        ]
+                    ),
                 )
                 .values(
                     stage=JobStage.CANCELLED.value,
@@ -679,6 +687,55 @@ class SqlJobRepository:
             row.updated_at = datetime.now(UTC)
             await session.flush()
             return _job(row)
+
+    async def choose_compression(
+        self, job_id: str, user_id: int, decision: CompressionDecision
+    ) -> Job | None:
+        if decision is CompressionDecision.ASK:
+            return None
+        async with self._sessions.begin() as session:
+            row = await session.scalar(
+                select(JobRow)
+                .where(
+                    JobRow.id == job_id,
+                    JobRow.user_id == user_id,
+                    JobRow.stage == JobStage.AWAITING_COMPRESSION.value,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                return None
+            payload = _decode_compression(row.compression_json)
+            if payload is None:
+                return None
+            row.compression_json = _encode_compression(payload, decision)
+            row.stage = JobStage.QUEUED.value
+            row.updated_at = datetime.now(UTC)
+            session.add(OutboxRow(job_id=row.id, created_at=row.updated_at))
+            await session.flush()
+            return _job(row)
+
+    async def offer_compression(
+        self, job_id: str, recommendation: CompressionRecommendation
+    ) -> Job | None:
+        async with self._sessions.begin() as session:
+            result = await session.execute(
+                update(JobRow)
+                .where(
+                    JobRow.id == job_id,
+                    JobRow.stage == JobStage.RESOLVING.value,
+                )
+                .values(
+                    stage=JobStage.AWAITING_COMPRESSION.value,
+                    compression_json=_encode_compression(
+                        recommendation, CompressionDecision.ASK
+                    ),
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(JobRow)
+            )
+            row = result.scalar_one_or_none()
+            return _job(row) if row else None
 
     async def claim_outbox(self, limit: int = 100) -> tuple[tuple[int, str], ...]:
         async with self._sessions.begin() as session:
@@ -941,6 +998,9 @@ def _job_values(job: Job) -> dict[str, object]:
         "inline_message_id": job.inline_message_id,
         "audio_only": job.audio_only,
         "preferences_json": json.dumps(asdict(job.preferences), sort_keys=True),
+        "compression_json": _encode_compression(
+            job.compression, job.compression_decision
+        ),
         "cancel_requested": job.cancel_requested,
         "error_code": job.error_code.value if job.error_code else None,
         "error_detail": job.error_detail,
@@ -969,6 +1029,8 @@ def _job(row: JobRow) -> Job:
         inline_message_id=row.inline_message_id,
         audio_only=row.audio_only,
         preferences=_decode_preferences(row.preferences_json),
+        compression_decision=_decode_compression_decision(row.compression_json),
+        compression=_decode_compression(row.compression_json),
         cancel_requested=row.cancel_requested,
         error_code=ErrorCode(row.error_code) if row.error_code else None,
         error_detail=row.error_detail,
@@ -1001,6 +1063,41 @@ def _decode_preferences(value: str) -> UserPreferences:
     return UserPreferences(
         **{key: item for key, item in data.items() if key in allowed}
     )
+
+
+def _encode_compression(
+    recommendation: CompressionRecommendation | None,
+    decision: CompressionDecision,
+) -> str | None:
+    if recommendation is None:
+        return None
+    payload = asdict(recommendation)
+    payload["kind"] = recommendation.kind.value
+    payload["decision"] = decision.value
+    return json.dumps(payload, sort_keys=True)
+
+
+def _decode_compression(value: str | None) -> CompressionRecommendation | None:
+    if not value:
+        return None
+    data = json.loads(value)
+    return CompressionRecommendation(
+        kind=MediaKind(data["kind"]),
+        original_size=int(data["original_size"]),
+        estimated_size=int(data["estimated_size"]),
+        duration_ms=int(data["duration_ms"]),
+        bitrate=int(data["bitrate"]),
+        target_bitrate=int(data["target_bitrate"]),
+        width=int(data["width"]) if data.get("width") is not None else None,
+        height=int(data["height"]) if data.get("height") is not None else None,
+        fps=float(data["fps"]) if data.get("fps") is not None else None,
+    )
+
+
+def _decode_compression_decision(value: str | None) -> CompressionDecision:
+    if not value:
+        return CompressionDecision.ASK
+    return CompressionDecision(json.loads(value).get("decision", "ask"))
 
 
 def _decode_artifacts(value: str) -> tuple[DownloadArtifact, ...]:

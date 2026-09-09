@@ -38,6 +38,7 @@ from .presenter import (
     MANUAL_RETRY_TEXT,
     RESULT_ACTIONS_TEXT,
     failure_keyboard,
+    render_compression_offer,
     render_progress,
     render_selection,
     selection_keyboard,
@@ -111,10 +112,17 @@ class AiogramTelegramGateway:
                 with suppress(TelegramBadRequest):
                     await self._bot.delete_message(job.chat_id, job.status_message_id)
             return job.status_message_id
-        markup = _status_keyboard(job)
-        if progress.stage is JobStage.FAILED:
-            markup = failure_keyboard(job.id)
-        text = render_progress(progress, compact=job.preferences.compact_progress)
+        if (
+            progress.stage is JobStage.AWAITING_COMPRESSION
+            and job.compression is not None
+        ):
+            markup = _compression_keyboard(job)
+            text = render_compression_offer(job.compression)
+        else:
+            markup = _status_keyboard(job)
+            if progress.stage is JobStage.FAILED:
+                markup = failure_keyboard(job.id)
+            text = render_progress(progress, compact=job.preferences.compact_progress)
         if job.inline_message_id:
             try:
                 await self._bot.edit_message_text(
@@ -304,6 +312,30 @@ def _status_keyboard(job: Job) -> InlineKeyboardMarkup | None:
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _compression_keyboard(job: Job) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Compress for viewing",
+                    callback_data=f"job:compression:compact:{job.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💾 Keep original",
+                    callback_data=f"job:compression:original:{job.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✖️ Cancel", callback_data=f"job:cancel:{job.id}"
+                )
+            ],
+        ]
+    )
 
 
 def _source_keyboard(url: str) -> InlineKeyboardMarkup:

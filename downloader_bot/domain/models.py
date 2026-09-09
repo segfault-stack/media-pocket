@@ -52,6 +52,7 @@ class JobStage(StrEnum):
     RESOLVING = "resolving"
     DOWNLOADING = "downloading"
     PROCESSING = "processing"
+    AWAITING_COMPRESSION = "awaiting_compression"
     READY = "ready"
     DELIVERING = "delivering"
     DELIVERED = "delivered"
@@ -72,6 +73,12 @@ class ErrorCode(StrEnum):
     DELETED = "deleted"
     REGION_RESTRICTED = "region_restricted"
     EXPIRED = "expired"
+
+
+class CompressionDecision(StrEnum):
+    ASK = "ask"
+    COMPACT = "compact"
+    ORIGINAL = "original"
 
 
 class SelectionMode(StrEnum):
@@ -116,6 +123,7 @@ ALLOWED_TRANSITIONS: Mapping[JobStage, frozenset[JobStage]] = MappingProxyType(
         ),
         JobStage.RESOLVING: frozenset(
             {
+                JobStage.AWAITING_COMPRESSION,
                 JobStage.DOWNLOADING,
                 JobStage.RETRYING,
                 JobStage.CANCELLING,
@@ -132,6 +140,9 @@ ALLOWED_TRANSITIONS: Mapping[JobStage, frozenset[JobStage]] = MappingProxyType(
         ),
         JobStage.PROCESSING: frozenset(
             {JobStage.READY, JobStage.RETRYING, JobStage.CANCELLING, JobStage.FAILED}
+        ),
+        JobStage.AWAITING_COMPRESSION: frozenset(
+            {JobStage.QUEUED, JobStage.CANCELLING, JobStage.FAILED}
         ),
         JobStage.READY: frozenset(
             {JobStage.DELIVERING, JobStage.CANCELLING, JobStage.FAILED}
@@ -172,6 +183,7 @@ class MediaAsset:
     thumbnail_url: str | None = None
     requires_extractor_download: bool = False
     fallback_urls: tuple[str, ...] = ()
+    compact_candidate: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +222,19 @@ class DownloadArtifact:
     author: str | None = None
     duration_ms: int | None = None
     thumbnail_path: PurePosixPath | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CompressionRecommendation:
+    kind: MediaKind
+    original_size: int
+    estimated_size: int
+    duration_ms: int
+    bitrate: int
+    target_bitrate: int
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +307,8 @@ class Job:
     inline_message_id: str | None = None
     audio_only: bool = False
     preferences: UserPreferences = field(default_factory=UserPreferences)
+    compression_decision: CompressionDecision = CompressionDecision.ASK
+    compression: CompressionRecommendation | None = None
     cancel_requested: bool = False
     error_code: ErrorCode | None = None
     error_detail: str | None = None
@@ -296,8 +323,13 @@ class Job:
     @property
     def cache_key(self) -> str:
         source_key = hashlib.sha256(self.source_url.encode()).hexdigest()
-        return (
+        base = (
             f"{source_key}:{self.preferences.cache_variant(audio_only=self.audio_only)}"
+        )
+        return (
+            f"{base}:compact"
+            if self.compression_decision is CompressionDecision.COMPACT
+            else base
         )
 
     def transition(self, stage: JobStage, *, now: datetime | None = None) -> Job:

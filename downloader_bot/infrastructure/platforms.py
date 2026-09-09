@@ -395,6 +395,7 @@ class YtDlpPlatformAdapter:
 @dataclass(slots=True)
 class DirectMediaPlatformAdapter:
     platform: Platform
+    offers_compression = True
 
     async def resolve(
         self,
@@ -414,6 +415,7 @@ class DirectMediaPlatformAdapter:
             source_url=url,
             kind=kind,
             title=title,
+            compact_candidate=True,
             request_headers=(
                 ("Accept", f"{kind.value}/*,application/octet-stream;q=0.9,*/*;q=0.8"),
                 ("Referer", f"{parsed.scheme}://{parsed.netloc}/"),

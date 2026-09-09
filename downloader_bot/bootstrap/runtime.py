@@ -75,6 +75,7 @@ async def run_bot(container: Container) -> None:
         bot_username=bot_identity.username,
         ux_selection_flow=container.settings.ux_selection_flow,
         plan_submission=container.plan_submission,
+        choose_compression=container.choose_compression,
         ux_analytics=container.analytics,
         access_control=container.access,
         generate_invite=container.generate_invite,
@@ -166,6 +167,14 @@ async def _present_progress(container, gateway, deliver, throttles, progress) ->
         return
     target_job = job
     target_progress = progress
+    if job.parent_id and progress.stage is JobStage.AWAITING_COMPRESSION:
+        status_id = await gateway.show_status(job, progress)
+        if status_id and not job.status_message_id:
+            await container.jobs.transition(
+                job.id, {job.stage}, job.stage, status_message_id=status_id
+            )
+        await container.refresh_parent.execute(job.parent_id)
+        return
     if progress.stage is JobStage.QUEUED and not job.is_parent:
         progress = replace(
             progress, queue_position=await container.jobs.queue_position(job.id)

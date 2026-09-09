@@ -1,4 +1,6 @@
 from .models import (
+    CompressionDecision,
+    CompressionRecommendation,
     DeliveryMode,
     DownloadArtifact,
     ErrorCode,
@@ -22,6 +24,8 @@ from .models import (
 )
 
 __all__ = [
+    "CompressionDecision",
+    "CompressionRecommendation",
     "DeliveryMode",
     "DownloadArtifact",
     "ErrorCode",

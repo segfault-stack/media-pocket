@@ -654,6 +654,42 @@ async def test_commands_settings_and_job_callbacks_are_mocked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compression_choice_requeues_the_job() -> None:
+    gateway = Gateway()
+    chooser = Stub()
+    chooser.execute = lambda *_args, **_kwargs: _value(
+        Job("job", 1, 2, "https://example.com/video.mp4", "key")
+    )
+    router = build_router(
+        Submit(),
+        Batch(),
+        Stub(),
+        Stub(),
+        Stub(),
+        Stub(),
+        Stub(),
+        Stub(),
+        gateway,
+        Jobs(),
+        choose_compression=chooser,
+    )
+    answers = []
+
+    async def answer(*args, **kwargs):
+        answers.append((args, kwargs))
+
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        data="job:compression:compact:job",
+        answer=answer,
+    )
+    await handler(router, "callback_query", "choose_media_compression")(query)
+
+    assert gateway.status[-1][1].stage is JobStage.QUEUED
+    assert answers[-1][0] == ("Download started",)
+
+
+@pytest.mark.asyncio
 async def test_navigation_selection_status_and_result_callbacks(monkeypatch) -> None:
     monkeypatch.setattr(
         "downloader_bot.adapters.telegram.router.Message", SimpleNamespace

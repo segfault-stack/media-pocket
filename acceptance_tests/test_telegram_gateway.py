@@ -23,6 +23,7 @@ from downloader_bot.adapters.telegram.gateway import (
 )
 from downloader_bot.adapters.telegram.presenter import LINK_RECEIVED_TEXT
 from downloader_bot.domain import (
+    CompressionRecommendation,
     DownloadArtifact,
     Job,
     JobStage,
@@ -97,6 +98,45 @@ async def test_gateway_creates_and_edits_status_for_direct_business_and_inline()
         "delete_message",
     ]
     assert bot.calls[0][2]["business_connection_id"] == "business"
+
+
+@pytest.mark.asyncio
+async def test_gateway_offers_compact_or_original_before_download() -> None:
+    bot = Bot()
+    gateway = AiogramTelegramGateway(bot)
+    recommendation = CompressionRecommendation(
+        MediaKind.VIDEO,
+        300 * 1024 * 1024,
+        30 * 1024 * 1024,
+        80_000,
+        30_000_000,
+        3_000_000,
+        3840,
+        2160,
+        30,
+    )
+    job = Job(
+        "job",
+        1,
+        2,
+        "https://example.com/video.mp4",
+        "key",
+        stage=JobStage.AWAITING_COMPRESSION,
+        compression=recommendation,
+    )
+
+    assert (
+        await gateway.show_status(
+            job, Progress(job.id, JobStage.AWAITING_COMPRESSION)
+        )
+        == 77
+    )
+    name, args, kwargs = bot.calls[-1]
+    assert name == "send_message"
+    assert "3840×2160" in args[1]
+    buttons = kwargs["reply_markup"].inline_keyboard
+    assert buttons[0][0].callback_data == "job:compression:compact:job"
+    assert buttons[1][0].callback_data == "job:compression:original:job"
 
 
 @pytest.mark.asyncio

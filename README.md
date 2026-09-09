@@ -42,7 +42,7 @@ The bot and workers run as separate processes. PostgreSQL stores canonical state
 | Video | YouTube | video, audio, playlists, timestamped-album splitting, automatic compatible formats, per-user mode |
 | Social | TikTok, Instagram, X / Twitter, Threads, Pinterest | media-first delivery, audio extraction, files, provider collections |
 | Audio | Spotify, SoundCloud, Zaycev.net, HitMoz | tracks, collections where supported, native Spotify audio or fallback |
-| Direct media | HTTP(S) audio/video URLs, direct 2ch video files | direct download; known 2ch mirrors retry automatically |
+| Direct media | HTTP(S) audio/video URLs, direct 2ch video files | remote media probe, optional streaming compression, known 2ch mirror retry |
 | Generic | Other HTTP(S) links | yt-dlp resolution where supported |
 
 Direct media detection uses the URL path extension, including common formats such as MP4, WebM, MP3, M4A, Ogg, Opus, WAV, and FLAC. For 2ch, this applies to direct video-file URLs rather than thread pages.
@@ -50,6 +50,8 @@ Direct media detection uses the URL path extension, including common formats suc
 Video sources can offer **Video** or **Audio** and **Media** or **File** delivery where those choices apply. Media Pocket automatically selects the best practical source format and prefers native Telegram playback over expensive transcoding. **File** delivery preserves the downloaded source whenever possible. Audio-first providers expose only relevant controls.
 
 For in-chat playback, Media Pocket prefers source H.264/AAC video and M4A/AAC or MP3 audio. It remuxes compatible streams without re-encoding, converts only an incompatible stream when possible, and falls back to full conversion only when Telegram needs it. Audio includes title, performer, duration, and thumbnail metadata when the provider supplies it; Spotify cover art is also embedded in the prepared audio file.
+
+Before downloading an unusually heavy direct video or audio file, Media Pocket compares its duration, bitrate, resolution, and estimated compact size with a practical streaming profile. The user can keep the original or choose a compact version. Compact mode lets FFmpeg read the source HTTP stream directly while it encodes the output, so the complete original is neither downloaded twice nor stored as an intermediate file.
 
 ## 🔄 Download flow
 
