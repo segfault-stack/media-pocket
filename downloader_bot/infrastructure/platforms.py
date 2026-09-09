@@ -389,6 +389,7 @@ class YtDlpPlatformAdapter:
             if isinstance(entry.get("thumbnail"), str)
             else None,
             requires_extractor_download=requires_extractor_download,
+            stream_copy_compatible=_stream_copy_compatible(entry, selected),
         )
 
 
@@ -1168,6 +1169,33 @@ def _hitmoz_http_error(exc: httpx.HTTPStatusError) -> DownloadError:
     if status in {401, 403, 404}:
         return DownloadError(ErrorCode.UNAVAILABLE, "HitMoz album is unavailable")
     return DownloadError(ErrorCode.PROVIDER_FAILURE, f"HitMoz returned HTTP {status}", retryable=True)
+
+
+def _stream_copy_compatible(entry: dict, selected: dict) -> bool:
+    requested = tuple(
+        stream
+        for stream in (
+            *(entry.get("requested_downloads") or ()),
+            *(entry.get("requested_formats") or ()),
+        )
+        if isinstance(stream, dict)
+    )
+    streams = requested or (selected, entry)
+    video_codecs = tuple(
+        codec
+        for stream in streams
+        if (codec := str(stream.get("vcodec") or "").lower()) and codec != "none"
+    )
+    audio_codecs = tuple(
+        codec
+        for stream in streams
+        if (codec := str(stream.get("acodec") or "").lower()) and codec != "none"
+    )
+    return (
+        bool(video_codecs)
+        and all(codec.startswith(("avc", "h264")) for codec in video_codecs)
+        and all(codec.startswith(("aac", "mp4a")) for codec in audio_codecs)
+    )
 
 
 def _format_selector(preferences: UserPreferences, *, audio_only: bool) -> str:

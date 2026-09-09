@@ -183,6 +183,7 @@ class MediaAsset:
     cookies_file: str | None = None
     thumbnail_url: str | None = None
     requires_extractor_download: bool = False
+    stream_copy_compatible: bool = False
     fallback_urls: tuple[str, ...] = ()
     compact_candidate: bool = False
 

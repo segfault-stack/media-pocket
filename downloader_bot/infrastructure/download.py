@@ -644,6 +644,17 @@ class HttpDownloadEngine:
                     "0:v:0",
                     "-map",
                     "0:a:0?",
+                    "-codec",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                )
+                if asset.stream_copy_compatible
+                else (
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0?",
                     "-codec:v",
                     "libx264",
                     "-preset",

@@ -599,8 +599,9 @@ async def test_ytdlp_fallback_downloads_with_mweb_and_readable_name(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream_copy_compatible", [True, False])
 async def test_merged_provider_download_pipes_to_telegram_mp4(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, stream_copy_compatible
 ) -> None:
     commands = []
 
@@ -655,6 +656,7 @@ async def test_merged_provider_download_pipes_to_telegram_mp4(
                 extractor_url="https://provider.example/post/x",
                 format_selector="bestvideo+bestaudio/best",
                 requires_extractor_download=True,
+                stream_copy_compatible=stream_copy_compatible,
             ),
             Job("job", 1, 1, "https://provider.example/post/x", "key"),
             1,
@@ -668,9 +670,14 @@ async def test_merged_provider_download_pipes_to_telegram_mp4(
     assert output.read_bytes() == b"telegram mp4"
     assert commands[0][commands[0].index("--output") + 1] == "-"
     assert commands[1][0] == "ffmpeg"
-    assert "libx264" in commands[1]
-    assert "aac" in commands[1]
-    assert "-shortest" in commands[1]
+    if stream_copy_compatible:
+        assert commands[1][commands[1].index("-codec") + 1] == "copy"
+        assert "libx264" not in commands[1]
+        assert "-shortest" not in commands[1]
+    else:
+        assert "libx264" in commands[1]
+        assert "aac" in commands[1]
+        assert "-shortest" in commands[1]
     assert not tuple(tmp_path.glob("*.ytdlp.*"))
 
 

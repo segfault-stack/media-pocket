@@ -210,6 +210,7 @@ async def test_ytdlp_fixture_maps_album_assets_and_photos(monkeypatch) -> None:
     assert [asset.kind for asset in post.assets] == [MediaKind.PHOTO, MediaKind.VIDEO]
     assert not post.assets[0].requires_extractor_download
     assert post.assets[1].requires_extractor_download
+    assert not post.assets[1].stream_copy_compatible
 
 
 @pytest.mark.asyncio
@@ -219,10 +220,27 @@ async def test_ytdlp_marks_merged_provider_formats_for_extractor_download(
     payload = {
         "webpage_url": "https://provider.example/post/x",
         "ext": "mkv",
-        "requested_downloads": [{"ext": "mkv", "protocol": "https+https"}],
+        "requested_downloads": [
+            {
+                "ext": "mp4",
+                "protocol": "https+https",
+                "vcodec": "avc1.64001f",
+                "acodec": "mp4a.40.2",
+            }
+        ],
         "requested_formats": [
-            {"url": "https://cdn.example/video.mp4", "ext": "mp4"},
-            {"url": "https://cdn.example/audio.m4a", "ext": "m4a"},
+            {
+                "url": "https://cdn.example/video.mp4",
+                "ext": "mp4",
+                "vcodec": "avc1.64001f",
+                "acodec": "none",
+            },
+            {
+                "url": "https://cdn.example/audio.m4a",
+                "ext": "m4a",
+                "vcodec": "none",
+                "acodec": "mp4a.40.2",
+            },
         ],
     }
 
@@ -242,6 +260,7 @@ async def test_ytdlp_marks_merged_provider_formats_for_extractor_download(
 
     assert post.assets[0].source_url == "https://provider.example/post/x"
     assert post.assets[0].requires_extractor_download
+    assert post.assets[0].stream_copy_compatible
 
 
 @pytest.mark.asyncio
