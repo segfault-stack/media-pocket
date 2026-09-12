@@ -319,7 +319,7 @@ def _compression_keyboard(job: Job) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📱 Compress for viewing",
+                    text="📦 Download compact version",
                     callback_data=f"job:compression:compact:{job.id}",
                 )
             ],

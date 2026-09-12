@@ -136,6 +136,7 @@ async def test_gateway_offers_compact_or_original_before_download() -> None:
     assert "3840×2160" in args[1]
     buttons = kwargs["reply_markup"].inline_keyboard
     assert buttons[0][0].callback_data == "job:compression:compact:job"
+    assert buttons[0][0].text == "📦 Download compact version"
     assert buttons[1][0].callback_data == "job:compression:original:job"
 
 
