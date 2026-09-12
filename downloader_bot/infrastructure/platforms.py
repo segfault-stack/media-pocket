@@ -762,6 +762,7 @@ class HitMozPlatformAdapter:
 
     platform: Platform
     client: httpx.AsyncClient
+    offers_compression = True
 
     async def resolve(
         self,
@@ -1353,6 +1354,7 @@ def _hitmoz_asset(
         title=normalize_audio_title(title, author),
         author=normalize_artist_names(author),
         thumbnail_url=thumbnail_url,
+        compact_candidate=True,
     )
 
 

@@ -906,6 +906,8 @@ async def test_hitmoz_song_uses_only_requested_track_metadata_and_cover() -> Non
     assert post.assets[0].thumbnail_url == (
         "https://statcore.hitmcdn.com/cover/044/bb2/1568982.jpg"
     )
+    assert post.assets[0].compact_candidate
+    assert HitMozPlatformAdapter.offers_compression
     assert post.assets[0].source_url.endswith("_80920587.mp3")
 
 
