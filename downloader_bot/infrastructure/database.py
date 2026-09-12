@@ -986,6 +986,11 @@ class SqlMediaCacheRepository:
                 )
             )
 
+    async def clear(self) -> int:
+        async with self._sessions.begin() as session:
+            keys = await session.scalars(delete(CacheRow).returning(CacheRow.key))
+            return len(keys.all())
+
 
 class SqlAnalyticsRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:

@@ -83,6 +83,7 @@ async def run_bot(container: Container) -> None:
         list_invites=container.list_invites,
         revoke_invite=container.revoke_invite,
         clear_background_jobs=container.clear_background_jobs,
+        clear_media_cache=container.clear_media_cache,
     )
     access = InviteAccessMiddleware(
         container.check_access, container.redeem_invite, bot_identity.username

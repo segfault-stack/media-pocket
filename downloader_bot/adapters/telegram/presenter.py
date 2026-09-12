@@ -147,6 +147,7 @@ ADMIN_INVITES_EMPTY_TEXT = "<b>🎫 Active invites</b>\n\nNo active invites."
 ADMIN_INVITES_TEXT = "<b>🎫 Active invites</b>\n\n{items}"
 ADMIN_INVITE_REVOKED_TOAST = "Invite revoked"
 ADMIN_JOBS_CLEARED_TOAST = "Cleared {count} active jobs"
+ADMIN_CACHE_CLEARED_TOAST = "Cleared {count} cached items"
 
 
 def access_required_keyboard(bot_username: str | None) -> InlineKeyboardMarkup | None:
@@ -185,6 +186,11 @@ def admin_invites_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="🧹 Clear background jobs", callback_data="adm:jobs:clear"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Clear media cache", callback_data="adm:cache:clear"
                 )
             ],
         ]

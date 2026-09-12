@@ -33,6 +33,7 @@ from downloader_bot.domain.youtube import has_youtube_playlist
 from .access import AdminOnlyMiddleware
 from .presenter import (
     ACTION_UNAVAILABLE_TEXT,
+    ADMIN_CACHE_CLEARED_TOAST,
     ADMIN_HOME_TEXT,
     ADMIN_INVITE_CREATED_TEXT,
     ADMIN_INVITE_REVOKED_TOAST,
@@ -120,6 +121,7 @@ def build_router(
     plan_submission=None,
     choose_compression=None,
     clear_background_jobs=None,
+    clear_media_cache=None,
 ) -> Router:
     router = Router(name="downloads-v2")
     admin_router = Router(name="invite-admin")
@@ -391,6 +393,20 @@ def build_router(
             )
         await query.answer(
             ADMIN_JOBS_CLEARED_TOAST.format(count=count), show_alert=True
+        )
+
+    @admin_router.callback_query(F.data == "adm:cache:clear")
+    async def admin_clear_media_cache(query: CallbackQuery) -> None:
+        if clear_media_cache is None:
+            await query.answer(ACTION_UNAVAILABLE_TEXT, show_alert=True)
+            return
+        count = await clear_media_cache.execute(query.from_user.id)
+        if isinstance(query.message, Message):
+            await query.message.edit_text(
+                ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard()
+            )
+        await query.answer(
+            ADMIN_CACHE_CLEARED_TOAST.format(count=count), show_alert=True
         )
 
     @admin_router.callback_query(F.data.startswith("adm:revoke:"))

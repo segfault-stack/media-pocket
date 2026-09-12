@@ -1154,6 +1154,19 @@ class ClearBackgroundJobs:
         return len(job_ids)
 
 
+class ClearMediaCache:
+    def __init__(
+        self, cache: MediaCacheRepository, analytics: AnalyticsRepository
+    ) -> None:
+        self._cache = cache
+        self._analytics = analytics
+
+    async def execute(self, actor_user_id: int | None = None) -> int:
+        count = await self._cache.clear()
+        await self._analytics.record("media_cache_cleared", user_id=actor_user_id)
+        return count
+
+
 class ManageSettings:
     def __init__(self, settings: SettingsRepository) -> None:
         self._settings = settings

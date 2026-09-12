@@ -145,7 +145,12 @@ def _handler_object(router, observer: str, name: str):
 
 
 def _admin_router(
-    access_control, generate=None, invites=None, revoke=None, clear_jobs=None
+    access_control,
+    generate=None,
+    invites=None,
+    revoke=None,
+    clear_jobs=None,
+    clear_cache=None,
 ):
     stub = GenericStub()
     router = build_router(
@@ -164,6 +169,7 @@ def _admin_router(
         list_invites=invites,
         revoke_invite=revoke,
         clear_background_jobs=clear_jobs,
+        clear_media_cache=clear_cache,
     )
     return router, router.sub_routers[0]
 
@@ -282,6 +288,7 @@ def test_invite_input_and_copy_button_are_short_and_explicit() -> None:
     ]
     assert "🔢 Limited uses" in labels
     assert "🧹 Clear background jobs" in labels
+    assert "🗑 Clear media cache" in labels
 
 
 @pytest.mark.asyncio
@@ -305,6 +312,30 @@ async def test_admin_can_clear_background_jobs(monkeypatch) -> None:
     assert clear.calls == [42]
     assert "Administration" in message.edit_text.await_args.args[0]
     assert query.answer.await_args.args[0] == "Cleared 4 active jobs"
+    assert query.answer.await_args.kwargs["show_alert"] is True
+
+
+@pytest.mark.asyncio
+async def test_admin_can_clear_media_cache_immediately(monkeypatch) -> None:
+    from downloader_bot.adapters.telegram import router as router_module
+
+    monkeypatch.setattr(router_module, "Message", FakeMessage)
+    clear = ClearJobs(12)
+    _root, admin = _admin_router(AccessControl(True), clear_cache=clear)
+    message = FakeMessage("/admin")
+    message.edit_text = AsyncMock()
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        data="adm:cache:clear",
+        message=message,
+        answer=AsyncMock(),
+    )
+
+    await _handler(admin, "callback_query", "admin_clear_media_cache")(query)
+
+    assert clear.calls == [42]
+    assert "Administration" in message.edit_text.await_args.args[0]
+    assert query.answer.await_args.args[0] == "Cleared 12 cached items"
     assert query.answer.await_args.kwargs["show_alert"] is True
 
 

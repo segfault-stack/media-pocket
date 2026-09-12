@@ -15,6 +15,7 @@ from downloader_bot.application.use_cases import (
     ChooseCompression,
     CleanupArtifacts,
     ClearBackgroundJobs,
+    ClearMediaCache,
     ConfirmSelection,
     CreateSelection,
     CustomizeJob,
@@ -316,6 +317,7 @@ class Cache:
         self.value = value
         self.keys = []
         self.puts = []
+        self.cleared = False
 
     async def get(self, key):
         self.keys.append(key)
@@ -325,6 +327,10 @@ class Cache:
         self.keys.append(key)
         self.puts.append((key, value))
         self.value = value
+
+    async def clear(self):
+        self.cleared = True
+        return 7
 
 
 class Adapter:
@@ -571,6 +577,17 @@ async def test_clear_background_jobs_cancels_active_jobs_and_empties_queue() -> 
     assert queue.cleared and queue.items == []
     assert artifacts.cleaned == [active.id]
     assert analytics.events == ["jobs_cleared"]
+
+
+@pytest.mark.asyncio
+async def test_clear_media_cache_removes_every_entry() -> None:
+    cache, analytics = Cache(), Analytics()
+
+    count = await ClearMediaCache(cache, analytics).execute(actor_user_id=42)
+
+    assert count == 7
+    assert cache.cleared
+    assert analytics.events == ["media_cache_cleared"]
 
 
 @pytest.mark.asyncio
