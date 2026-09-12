@@ -202,7 +202,7 @@ async def build_container(settings: Settings) -> Container:
         plan_submission=PlanSubmission(preferences, registry),
         publish_outbox=PublishOutbox(jobs, queue),
         get_stats=GetStats(analytics),
-        check_access=CheckAccess(access),
+        check_access=CheckAccess(access, settings.admin_ids),
         redeem_invite=RedeemInvite(access, clock),
         generate_invite=GenerateInvite(access, clock),
         list_invites=ListInvites(access, clock),

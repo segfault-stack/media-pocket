@@ -20,10 +20,15 @@ def generate_invite_code(length: int = 8) -> str:
 
 
 class CheckAccess:
-    def __init__(self, access: AccessRepository) -> None:
+    def __init__(
+        self, access: AccessRepository, bypass_user_ids: frozenset[int] = frozenset()
+    ) -> None:
         self._access = access
+        self._bypass_user_ids = bypass_user_ids
 
     async def execute(self, user_id: int) -> bool:
+        if user_id in self._bypass_user_ids:
+            return True
         return await self._access.is_allowed(user_id)
 
 

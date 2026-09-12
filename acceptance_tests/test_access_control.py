@@ -163,6 +163,18 @@ async def test_access_redemption_normalizes_code_and_one_time_is_consumed() -> N
 
 
 @pytest.mark.asyncio
+async def test_configured_whitelist_bypasses_the_database_access_lookup() -> None:
+    class NoLookupAccess(Access):
+        async def is_allowed(self, user_id):
+            raise AssertionError(f"unexpected database lookup for {user_id}")
+
+    access = NoLookupAccess()
+    check = CheckAccess(access, frozenset({42}))
+
+    assert await check.execute(42)
+
+
+@pytest.mark.asyncio
 async def test_only_admin_can_manage_invites() -> None:
     access = Access()
     generate = GenerateInvite(access, Clock(), lambda: "CODE2345")
