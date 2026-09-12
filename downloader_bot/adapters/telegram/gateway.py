@@ -52,6 +52,34 @@ class AiogramTelegramGateway:
         self._bot = bot
         self._bot_username = (bot_username or "").lstrip("@")
         self._delete_warnings: set[int] = set()
+        self._last_keyboard_messages: dict[
+            tuple[int, int], tuple[int, str | None]
+        ] = {}
+        self._dismissed_through: dict[tuple[int, int], int] = {}
+
+    async def dismiss_previous_keyboard(
+        self,
+        chat_id: int,
+        user_id: int,
+        business_connection_id: str | None = None,
+    ) -> None:
+        key = (chat_id, user_id)
+        previous = self._last_keyboard_messages.pop(key, None)
+        if previous is None:
+            return
+        message_id, previous_business_connection_id = previous
+        self._dismissed_through[key] = max(
+            message_id, self._dismissed_through.get(key, 0)
+        )
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await self._bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=None,
+                business_connection_id=(
+                    previous_business_connection_id or business_connection_id
+                ),
+            )
 
     async def show_waiting(
         self,
@@ -71,6 +99,12 @@ class AiogramTelegramGateway:
             render_selection(selection),
             reply_markup=selection_keyboard(selection),
             business_connection_id=selection.business_connection_id,
+        )
+        self._remember_keyboard(
+            selection.chat_id,
+            selection.user_id,
+            message.message_id,
+            selection.business_connection_id,
         )
         return message.message_id
 
@@ -95,13 +129,29 @@ class AiogramTelegramGateway:
         if not selection.status_message_id:
             return
         try:
+            markup = (
+                selection_keyboard(selection)
+                if self._keyboard_is_current(
+                    selection.chat_id,
+                    selection.user_id,
+                    selection.status_message_id,
+                )
+                else None
+            )
             await self._bot.edit_message_text(
                 render_selection(selection),
                 chat_id=selection.chat_id,
                 message_id=selection.status_message_id,
-                reply_markup=selection_keyboard(selection),
+                reply_markup=markup,
                 business_connection_id=selection.business_connection_id,
             )
+            if markup is not None:
+                self._remember_keyboard(
+                    selection.chat_id,
+                    selection.user_id,
+                    selection.status_message_id,
+                    selection.business_connection_id,
+                )
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc).lower():
                 raise
@@ -111,6 +161,7 @@ class AiogramTelegramGateway:
             if job.status_message_id:
                 with suppress(TelegramBadRequest):
                     await self._bot.delete_message(job.chat_id, job.status_message_id)
+                self._forget_keyboard(job.chat_id, job.user_id, job.status_message_id)
             return job.status_message_id
         if (
             progress.stage is JobStage.AWAITING_COMPRESSION
@@ -133,6 +184,10 @@ class AiogramTelegramGateway:
                     raise
             return None
         if job.status_message_id:
+            if not self._keyboard_is_current(
+                job.chat_id, job.user_id, job.status_message_id
+            ):
+                markup = None
             try:
                 await self._bot.edit_message_text(
                     text,
@@ -141,6 +196,13 @@ class AiogramTelegramGateway:
                     reply_markup=markup,
                     business_connection_id=job.business_connection_id,
                 )
+                if markup is not None:
+                    self._remember_keyboard(
+                        job.chat_id,
+                        job.user_id,
+                        job.status_message_id,
+                        job.business_connection_id,
+                    )
                 return job.status_message_id
             except TelegramBadRequest as exc:
                 if "message is not modified" in str(exc).lower():
@@ -151,6 +213,13 @@ class AiogramTelegramGateway:
             reply_markup=markup,
             business_connection_id=job.business_connection_id,
         )
+        if markup is not None:
+            self._remember_keyboard(
+                job.chat_id,
+                job.user_id,
+                message.message_id,
+                job.business_connection_id,
+            )
         return message.message_id
 
     async def deliver(
@@ -223,12 +292,42 @@ class AiogramTelegramGateway:
             if len(artifacts) > 1
             else RESULT_ACTIONS_TEXT
         )
-        await self._bot.send_message(
+        message = await self._bot.send_message(
             job.chat_id,
             text,
             reply_markup=_result_keyboard(job, artifacts[0]),
             business_connection_id=job.business_connection_id,
         )
+        self._remember_keyboard(
+            job.chat_id,
+            job.user_id,
+            message.message_id,
+            job.business_connection_id,
+        )
+
+    def _keyboard_is_current(
+        self, chat_id: int, user_id: int, message_id: int
+    ) -> bool:
+        return message_id > self._dismissed_through.get((chat_id, user_id), 0)
+
+    def _remember_keyboard(
+        self,
+        chat_id: int,
+        user_id: int,
+        message_id: int,
+        business_connection_id: str | None,
+    ) -> None:
+        if self._keyboard_is_current(chat_id, user_id, message_id):
+            self._last_keyboard_messages[(chat_id, user_id)] = (
+                message_id,
+                business_connection_id,
+            )
+
+    def _forget_keyboard(self, chat_id: int, user_id: int, message_id: int) -> None:
+        key = (chat_id, user_id)
+        previous = self._last_keyboard_messages.get(key)
+        if previous is not None and previous[0] == message_id:
+            self._last_keyboard_messages.pop(key, None)
 
     async def _deliver_individually(
         self,

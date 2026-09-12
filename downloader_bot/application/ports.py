@@ -180,6 +180,12 @@ class ArtifactStore(Protocol):
 
 
 class TelegramGateway(Protocol):
+    async def dismiss_previous_keyboard(
+        self,
+        chat_id: int,
+        user_id: int,
+        business_connection_id: str | None = None,
+    ) -> None: ...
     async def delete_source(
         self,
         chat_id: int,

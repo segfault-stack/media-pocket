@@ -446,6 +446,9 @@ def build_router(
                 await message.answer(FAST_VIDEO_HINT)
             return
         business_connection_id = getattr(message, "business_connection_id", None)
+        await gateway.dismiss_previous_keyboard(
+            message.chat.id, message.from_user.id, business_connection_id
+        )
         kind = (
             JobKind.BUSINESS
             if business_connection_id

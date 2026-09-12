@@ -71,6 +71,29 @@ async def test_gateway_sends_immediate_waiting_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_removes_previous_keyboard_before_a_new_url() -> None:
+    bot = Bot()
+    gateway = AiogramTelegramGateway(bot)
+    job = Job("old", 1, 2, "https://example.com/old", "old-key")
+
+    assert await gateway.show_status(job, Progress(job.id, JobStage.QUEUED)) == 77
+    await gateway.dismiss_previous_keyboard(2, 1)
+    await gateway.show_status(
+        replace(job, status_message_id=77),
+        Progress(job.id, JobStage.DOWNLOADING, 50),
+    )
+
+    assert [call[0] for call in bot.calls] == [
+        "send_message",
+        "edit_message_reply_markup",
+        "edit_message_text",
+    ]
+    assert bot.calls[1][2]["message_id"] == 77
+    assert bot.calls[1][2]["reply_markup"] is None
+    assert bot.calls[2][2]["reply_markup"] is None
+
+
+@pytest.mark.asyncio
 async def test_gateway_creates_and_edits_status_for_direct_business_and_inline() -> (
     None
 ):

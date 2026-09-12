@@ -65,6 +65,12 @@ class Gateway:
         self.status = []
         self.deleted = []
         self.waiting = []
+        self.dismissed = []
+
+    async def dismiss_previous_keyboard(
+        self, chat_id, user_id, business_connection_id=None
+    ):
+        self.dismissed.append((chat_id, user_id, business_connection_id))
 
     async def show_waiting(self, chat_id, business_connection_id=None):
         self.waiting.append((chat_id, business_connection_id))
@@ -298,6 +304,7 @@ async def test_direct_business_and_group_use_same_pipeline(
     await handler(router, "message", "links")(message)
     assert submit.commands[-1].kind is kind
     assert gateway.status[-1][0].kind is kind
+    assert gateway.dismissed == [(8, 7, business_id)]
 
 
 @pytest.mark.asyncio
