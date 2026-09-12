@@ -9,6 +9,7 @@ import signal
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from html.parser import HTMLParser
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import TypedDict
@@ -117,6 +118,43 @@ class _SpotifyTrack(TypedDict):
     author: str | None
     duration_ms: int | None
     thumbnail_url: str | None
+
+
+class _HitMozTrack(TypedDict):
+    url: str
+    title: str | None
+    artist: str | None
+    image: str | None
+    id: str | None
+
+
+class _HitMozMetadataParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tracks: list[_HitMozTrack] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        del tag
+        raw = dict(attrs).get("data-musmeta")
+        if not raw:
+            return
+        try:
+            metadata = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("url"), str):
+            return
+        self.tracks.append(
+            {
+                "url": metadata["url"],
+                "title": _optional_string(metadata.get("title")),
+                "artist": _optional_string(metadata.get("artist")),
+                "image": _optional_string(metadata.get("img")),
+                "id": _optional_string(metadata.get("id")),
+            }
+        )
 
 
 async def _communicate_ytdlp(
@@ -760,15 +798,12 @@ class HitMozPlatformAdapter:
                     ErrorCode.PROVIDER_FAILURE, "Could not reach HitMoz", retryable=True
                 )
                 continue
-            links = _hitmoz_download_links(response.text, str(response.url))
-            if not links:
+            assets = _hitmoz_assets(response.text, str(response.url), url)
+            if not assets:
                 last_error = DownloadError(
                     ErrorCode.UNAVAILABLE, "No downloadable tracks found on HitMoz"
                 )
                 continue
-            assets = tuple(
-                _hitmoz_asset(link, index) for index, link in enumerate(links)
-            )
             return MediaPost(
                 source_url=url,
                 platform=self.platform,
@@ -1239,23 +1274,90 @@ def _hitmoz_download_links(page: str, base_url: str) -> tuple[str, ...]:
     return tuple(links)
 
 
+def _hitmoz_assets(page: str, base_url: str, requested_url: str) -> tuple[MediaAsset, ...]:
+    parser = _HitMozMetadataParser()
+    parser.feed(page)
+    song_id = _hitmoz_song_id(requested_url)
+    tracks = parser.tracks
+    if song_id:
+        tracks = [track for track in tracks if _hitmoz_track_id(track) == song_id]
+    if tracks:
+        seen: set[str] = set()
+        assets: list[MediaAsset] = []
+        for track in tracks:
+            download_url = urljoin(base_url, track["url"])
+            if download_url in seen:
+                continue
+            seen.add(download_url)
+            assets.append(
+                _hitmoz_asset(
+                    download_url,
+                    len(assets),
+                    title=track["title"],
+                    author=track["artist"],
+                    thumbnail_url=urljoin(base_url, track["image"])
+                    if track["image"]
+                    else None,
+                )
+            )
+        return tuple(assets)
+
+    links = _hitmoz_download_links(page, base_url)
+    if song_id:
+        links = tuple(link for link in links if _hitmoz_url_track_id(link) == song_id)
+    return tuple(_hitmoz_asset(link, index) for index, link in enumerate(links))
+
+
+def _hitmoz_song_id(url: str) -> str | None:
+    match = re.fullmatch(r"/song/(?P<id>\d+)/?", urlsplit(url).path)
+    return match.group("id") if match else None
+
+
+def _hitmoz_track_id(track: _HitMozTrack) -> str | None:
+    raw_id = track["id"]
+    if raw_id:
+        match = re.search(r"(?P<id>\d+)$", raw_id)
+        if match:
+            return match.group("id")
+    return _hitmoz_url_track_id(track["url"])
+
+
+def _hitmoz_url_track_id(url: str) -> str | None:
+    stem = urlsplit(url).path.rsplit("/", 1)[-1].removesuffix(".mp3")
+    match = _HITMOZ_FILENAME_PATTERN.search(stem)
+    return match.group("id") if match else None
+
+
 def _hitmoz_track_title(download_url: str) -> str:
     filename = urlsplit(download_url).path.rsplit("/", 1)[-1].removesuffix(".mp3")
     filename = _HITMOZ_FILENAME_PATTERN.sub("", filename)
     return filename.replace("_-_", " - ").replace("_", " ").strip()
 
 
-def _hitmoz_asset(download_url: str, index: int) -> MediaAsset:
-    raw_title = _hitmoz_track_title(download_url)
-    split = split_audio_artist_title(raw_title)
-    author, title = split if split else (None, raw_title)
+def _hitmoz_asset(
+    download_url: str,
+    index: int,
+    *,
+    title: str | None = None,
+    author: str | None = None,
+    thumbnail_url: str | None = None,
+) -> MediaAsset:
+    if not title:
+        raw_title = _hitmoz_track_title(download_url)
+        split = split_audio_artist_title(raw_title)
+        author, title = split if split else (None, raw_title)
     return MediaAsset(
         source_url=download_url,
         kind=MediaKind.AUDIO,
         index=index,
         title=normalize_audio_title(title, author),
         author=normalize_artist_names(author),
+        thumbnail_url=thumbnail_url,
     )
+
+
+def _optional_string(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _html_title(page: str) -> str | None:

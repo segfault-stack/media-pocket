@@ -877,6 +877,39 @@ async def test_hitmoz_album_parser_preserves_track_order_and_deduplicates_links(
 
 
 @pytest.mark.asyncio
+async def test_hitmoz_song_uses_only_requested_track_metadata_and_cover() -> None:
+    page = """
+        <div class="tracks__item" data-musmeta='{
+          "artist":"Гражданская оборона",
+          "title":"Будильник - Не смешно",
+          "url":"/get/music/20260223/Grazhdanskaya_oborona_-_Budilnik_-_Ne_smeshno_80920587.mp3",
+          "img":"https://statcore.hitmcdn.com/cover/044/bb2/1568982.jpg",
+          "id":"track-id-80920587"
+        }'></div>
+        <div class="tracks__item" data-musmeta='{
+          "artist":"Другой исполнитель",
+          "title":"Рекомендация",
+          "url":"/get/music/20260223/Drugojj_-_Rekomendaciya_80920588.mp3",
+          "img":"https://statcore.hitmcdn.com/cover/other.jpg",
+          "id":"track-id-80920588"
+        }'></div>
+    """
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, text=page))
+    async with httpx.AsyncClient(transport=transport) as client:
+        post = await HitMozPlatformAdapter(Platform.HITMOZ, client).resolve(
+            "https://eu.hitmoz.com/song/80920587", UserPreferences()
+        )
+
+    assert len(post.assets) == 1
+    assert post.assets[0].title == "Будильник - Не смешно"
+    assert post.assets[0].author == "Гражданская оборона"
+    assert post.assets[0].thumbnail_url == (
+        "https://statcore.hitmcdn.com/cover/044/bb2/1568982.jpg"
+    )
+    assert post.assets[0].source_url.endswith("_80920587.mp3")
+
+
+@pytest.mark.asyncio
 async def test_hitmoz_uses_mirror_when_source_domain_is_unavailable() -> None:
     page = '<a href="/get/music/20260822/Artist_-_Song_123456.mp3">track</a>'
 
