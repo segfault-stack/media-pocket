@@ -1128,8 +1128,8 @@ def _compression_recommendation(
         else None
     )
     if kind is MediaKind.AUDIO:
-        target_bitrate = 160_000
-        minimum_saving = 5 * 1024 * 1024
+        target_bitrate = 192_000
+        minimum_saving = 4 * 1024 * 1024
         target_total_bitrate = target_bitrate
     else:
         target_bitrate = 4_500_000 if fps and fps > 30 else 3_000_000

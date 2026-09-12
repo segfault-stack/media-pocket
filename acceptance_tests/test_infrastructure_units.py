@@ -128,7 +128,7 @@ def test_compression_recommendation_uses_streaming_bitrate_and_savings() -> None
         MediaKind.AUDIO,
     )
     assert audio is not None
-    assert audio.target_bitrate == 160_000
+    assert audio.target_bitrate == 192_000
 
 
 @pytest.mark.asyncio
@@ -136,7 +136,7 @@ def test_compression_recommendation_uses_streaming_bitrate_and_savings() -> None
     ("kind", "target_bitrate", "container"),
     [
         (MediaKind.VIDEO, 3_000_000, "mp4"),
-        (MediaKind.AUDIO, 160_000, "ipod"),
+        (MediaKind.AUDIO, 192_000, "ipod"),
     ],
 )
 async def test_compact_ffmpeg_process_reads_the_remote_stream_directly(
