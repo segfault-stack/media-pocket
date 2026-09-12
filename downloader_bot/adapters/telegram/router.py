@@ -400,13 +400,18 @@ def build_router(
         if clear_media_cache is None:
             await query.answer(ACTION_UNAVAILABLE_TEXT, show_alert=True)
             return
-        count = await clear_media_cache.execute(query.from_user.id)
+        cache_count, artifact_count = await clear_media_cache.execute(
+            query.from_user.id
+        )
         if isinstance(query.message, Message):
             await query.message.edit_text(
                 ADMIN_HOME_TEXT, reply_markup=admin_invites_keyboard()
             )
         await query.answer(
-            ADMIN_CACHE_CLEARED_TOAST.format(count=count), show_alert=True
+            ADMIN_CACHE_CLEARED_TOAST.format(
+                cache_count=cache_count, artifact_count=artifact_count
+            ),
+            show_alert=True,
         )
 
     @admin_router.callback_query(F.data.startswith("adm:revoke:"))

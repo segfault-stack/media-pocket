@@ -148,6 +148,7 @@ async def build_container(settings: Settings) -> Container:
     )
     submit = SubmitDownload(jobs, users, ids, clock, analytics, preferences)
     submit_batch = SubmitBatch(submit, jobs, ids, clock, preferences)
+    cleanup_artifacts = CleanupArtifacts(jobs, artifacts, clock)
     return Container(
         settings=settings,
         engine=engine,
@@ -179,9 +180,9 @@ async def build_container(settings: Settings) -> Container:
         customize_job=CustomizeJob(jobs),
         choose_compression=ChooseCompression(jobs, analytics),
         refresh_parent=RefreshParent(jobs, progress),
-        cleanup_artifacts=CleanupArtifacts(jobs, artifacts, clock),
+        cleanup_artifacts=cleanup_artifacts,
         clear_background_jobs=ClearBackgroundJobs(jobs, queue, artifacts, analytics),
-        clear_media_cache=ClearMediaCache(cache, analytics),
+        clear_media_cache=ClearMediaCache(cache, cleanup_artifacts, analytics),
         process=ProcessDownload(
             jobs,
             registry,

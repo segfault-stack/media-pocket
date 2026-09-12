@@ -1156,15 +1156,24 @@ class ClearBackgroundJobs:
 
 class ClearMediaCache:
     def __init__(
-        self, cache: MediaCacheRepository, analytics: AnalyticsRepository
+        self,
+        cache: MediaCacheRepository,
+        cleanup_artifacts: CleanupArtifacts,
+        analytics: AnalyticsRepository,
     ) -> None:
         self._cache = cache
+        self._cleanup_artifacts = cleanup_artifacts
         self._analytics = analytics
 
-    async def execute(self, actor_user_id: int | None = None) -> int:
-        count = await self._cache.clear()
+    async def execute(self, actor_user_id: int | None = None) -> tuple[int, int]:
+        cache_count = await self._cache.clear()
+        artifact_count = 0
+        while cleaned := await self._cleanup_artifacts.execute(
+            retention_seconds=0, limit=100
+        ):
+            artifact_count += cleaned
         await self._analytics.record("media_cache_cleared", user_id=actor_user_id)
-        return count
+        return cache_count, artifact_count
 
 
 class ManageSettings:

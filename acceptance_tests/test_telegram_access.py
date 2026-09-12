@@ -111,7 +111,7 @@ class Revoke:
 
 
 class ClearJobs:
-    def __init__(self, count: int = 3) -> None:
+    def __init__(self, count=3) -> None:
         self.count = count
         self.calls = []
 
@@ -320,7 +320,7 @@ async def test_admin_can_clear_media_cache_immediately(monkeypatch) -> None:
     from downloader_bot.adapters.telegram import router as router_module
 
     monkeypatch.setattr(router_module, "Message", FakeMessage)
-    clear = ClearJobs(12)
+    clear = ClearJobs((12, 8))
     _root, admin = _admin_router(AccessControl(True), clear_cache=clear)
     message = FakeMessage("/admin")
     message.edit_text = AsyncMock()
@@ -335,7 +335,9 @@ async def test_admin_can_clear_media_cache_immediately(monkeypatch) -> None:
 
     assert clear.calls == [42]
     assert "Administration" in message.edit_text.await_args.args[0]
-    assert query.answer.await_args.args[0] == "Cleared 12 cached items"
+    assert query.answer.await_args.args[0] == (
+        "Cleared 12 cached items and 8 stored downloads"
+    )
     assert query.answer.await_args.kwargs["show_alert"] is True
 
 

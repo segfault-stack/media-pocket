@@ -333,6 +333,16 @@ class Cache:
         return 7
 
 
+class ArtifactCleanup:
+    def __init__(self) -> None:
+        self.calls = []
+        self.results = [100, 2, 0]
+
+    async def execute(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.results.pop(0)
+
+
 class Adapter:
     platform = Platform.GENERIC
 
@@ -581,12 +591,19 @@ async def test_clear_background_jobs_cancels_active_jobs_and_empties_queue() -> 
 
 @pytest.mark.asyncio
 async def test_clear_media_cache_removes_every_entry() -> None:
-    cache, analytics = Cache(), Analytics()
+    cache, cleanup, analytics = Cache(), ArtifactCleanup(), Analytics()
 
-    count = await ClearMediaCache(cache, analytics).execute(actor_user_id=42)
+    result = await ClearMediaCache(cache, cleanup, analytics).execute(
+        actor_user_id=42
+    )
 
-    assert count == 7
+    assert result == (7, 102)
     assert cache.cleared
+    assert cleanup.calls == [
+        {"retention_seconds": 0, "limit": 100},
+        {"retention_seconds": 0, "limit": 100},
+        {"retention_seconds": 0, "limit": 100},
+    ]
     assert analytics.events == ["media_cache_cleared"]
 
 
